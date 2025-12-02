@@ -28,6 +28,7 @@ dotenv.config();
 const corsOptions = {
   origin: [
     "https://oms-rust.vercel.app", // ⭐ your admin frontend
+    "https://oms-pz2iyzcqu-kanishk-yadavs-projects.vercel.app", // ✅ Add this
     "http://localhost:3000",
     "http://localhost:3001",
   ],
