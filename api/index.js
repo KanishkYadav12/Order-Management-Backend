@@ -25,16 +25,13 @@ import dashboardRouter from "../routes/dashboardRouter.js";
 const app = express();
 dotenv.config();
 
-const corsOptions = {
-  origin: [
-    "https://orm-frontend-eight.vercel.app",
-    "https://oms-customer-three.vercel.app",
-    "http://localhost:3000",
-    "http://localhost:3001",
-  ],
-  methods: ["POST", "GET", "PUT", "DELETE", "PATCH"],
-  credentials: true,
-};
+app.use(
+  cors({
+    origin: "https://oms-rust.vercel.app",
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
 
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
