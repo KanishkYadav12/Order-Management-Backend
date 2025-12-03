@@ -24,11 +24,11 @@ export const error = (err, req, res, next) => {
       .join(", ")}`;
     err.statusCode = 400;
   } else if (
-    err.name === "JsonWebauthTokenError" ||
-    err.name === "authTokenExpiredError"
+    err.name === "JsonWebtokenError" ||
+    err.name === "tokenExpiredError"
   ) {
     // JWT related errors
-    err.message = "Invalid or expired authToken!";
+    err.message = "Invalid or expired token!";
     err.statusCode = 401;
   } else if (err.name === "TypeError") {
     // Handle any other unexpected errors gracefully

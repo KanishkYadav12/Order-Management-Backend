@@ -1,4 +1,4 @@
-import jwt from "jsonwebauthToken";
+import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import { ROLES } from "../utils/constant.js";
 import { SuperAdmin, HotelOwner } from "../models/userModel.js";
@@ -9,16 +9,16 @@ dotenv.config();
 
 // Middleware to protect routes by verifying JWT and attaching user to request object
 // export const protect = async (req, res, next) => {
-//   let authToken;
+//   let token;
 
 //   // Check if authorization header exists and starts with 'Bearer'
 //   if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
 //     try {
-//       // Get authToken from header
-//       authToken = req.headers.authorization.split(' ')[1];
+//       // Get token from header
+//       token = req.headers.authorization.split(' ')[1];
 
-//       // Verify authToken using JWT_SECRET
-//       const decoded = jwt.verify(authToken, process.env.JWT_SECRET);
+//       // Verify token using JWT_SECRET
+//       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
 //       // Dynamically attach the user model based on the role (SuperAdmin or HotelOwner)
 //       if (decoded.role === ROLES.SUPER_ADMIN) {
@@ -46,38 +46,32 @@ dotenv.config();
 //     } catch (error) {
 //       console.error(error);
 
-//       // Check if it's a authTokenExpiredError
-//       if (error.name === 'authTokenExpiredError') {
-//         throw new ClientError('authToken has expired, please log in again', 401);
+//       // Check if it's a tokenExpiredError
+//       if (error.name === 'tokenExpiredError') {
+//         throw new ClientError('token has expired, please log in again', 401);
 //       }
 
-//       // If it's any other error (invalid authToken, internal issues), throw a ServerError
-//       if (error instanceof jwt.JsonWebauthTokenError) {
-//         throw new ClientError('Not authorized, authToken failed', 401);
+//       // If it's any other error (invalid token, internal issues), throw a ServerError
+//       if (error instanceof jwt.JsonWebtokenError) {
+//         throw new ClientError('Not authorized, token failed', 401);
 //       }
 
 //       // Catch any other unexpected errors and throw a ServerError
 //       throw new ServerError('Server error during authentication', 500);
 //     }
 //   } else {
-//     // If no authorization authToken is provided, throw ClientError
-//     throw new ClientError('Not authorized, no authToken', 401);
+//     // If no authorization token is provided, throw ClientError
+//     throw new ClientError('Not authorized, no token', 401);
 //   }
 // };
 
 export const protect = async (req, res, next) => {
-  let authToken;
-
-  // this is logic old logic to extract authToken from header
-  // if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-  //   authToken = req.headers.authorization.split(' ')[1];
-
-  //logic to extract authToken from cookie
-  console.log("IN Protect authToken : ", req.cookies);
+  let token;
+  console.log("IN Protect token : ", req.cookies);
   if (req.cookies && req.cookies.authToken) {
-    authToken = req.cookies.authToken;
+    token = req.cookies.authToken;
     try {
-      const decoded = jwt.verify(authToken, process.env.JWT_SECRET);
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
       console.log("decoded role ", decoded);
       if (decoded.role === ROLES.SUPER_ADMIN) {
         req.user = await SuperAdmin.findById(decoded.id).select("-password");
@@ -103,21 +97,21 @@ export const protect = async (req, res, next) => {
       next();
     } catch (error) {
       console.error("error", error);
-      if (error.name === "authTokenExpiredError") {
+      if (error.name === "tokenExpiredError") {
         return next(
-          new ClientError("authToken has expired, please log in again", 401)
+          new ClientError("token has expired, please log in again", 401)
         );
       }
 
-      if (error instanceof jwt.JsonWebauthTokenError) {
-        return next(new ClientError("Not authorized, authToken failed", 401));
+      if (error instanceof jwt.JsonWebTokenError) {
+        return next(new ClientError("Not authorized, token failed", 401));
       }
 
       next(new ServerError("Server error during authentication", 500));
     }
   } else {
     console.log("else error here");
-    next(new ClientError("Not authorized, no authToken", 401));
+    next(new ClientError("Not authorized, no token", 401));
   }
 };
 

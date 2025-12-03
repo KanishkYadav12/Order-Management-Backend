@@ -3,4 +3,4 @@ export * from "./upload.js";
 export * from "./constant.js";
 export * from "./errorHandler.js";
 export * from "./sendEmail.js";
-export * from "./generateauthToken.js";
+export * from "./generatetoken.js";

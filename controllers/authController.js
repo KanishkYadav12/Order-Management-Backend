@@ -8,15 +8,14 @@ import sendEmail from "../utils/sendEmail.js";
 import crypto from "crypto";
 
 export const signUp = catchAsyncError(async (req, res, next, session) => {
-  console.log("signup-req : ", req.body);
   const { email, password, role, devKey, name } = req.body;
 
-  const { newUser, authToken } = await createUserWithRole(
+  const { newUser, token } = await createUserWithRole(
     { email, password, role, devKey, name },
     session
   );
 
-  res.cookie("authToken", authToken, {
+  res.cookie("authToken", token, {
     httpOnly: false,
     sameSite: "None",
     secure: process.env.NODE_ENV === "production",
@@ -34,9 +33,9 @@ export const signUp = catchAsyncError(async (req, res, next, session) => {
 export const login = catchAsyncError(async (req, res) => {
   const { email, password, role } = req.body;
 
-  const { user, authToken } = await authenticateUser({ email, password, role });
+  const { user, token } = await authenticateUser({ email, password, role });
 
-  res.cookie("authToken", authToken, {
+  res.cookie("authToken", token, {
     httpOnly: false,
     sameSite: "None",
     secure: true,
@@ -51,7 +50,7 @@ export const login = catchAsyncError(async (req, res) => {
       name: user.name,
       role: user.role,
       email: user.email,
-      authToken,
+      token,
     },
   });
 });
@@ -148,14 +147,14 @@ export const forgotPassword = catchAsyncError(async (req, res) => {
       .json({ status: "failed", message: "User not found." });
   }
 
-  // Generate a password reset authToken with jwt
-  const resetauthToken = user.createPasswordResetauthToken();
+  // Generate a password reset token with jwt
+  const resettoken = user.createPasswordResettoken();
   await user.save({ validateBeforeSave: false });
 
   // const frontendURL = process.env.FRONTEND_URL;
 
   const frontendURL = "https://orm-frontend-eight.vercel.app";
-  const resetURL = `${frontendURL}/reset-password/${resetauthToken}`;
+  const resetURL = `${frontendURL}/reset-password/${resettoken}`;
 
   const subject = "Password Reset Link";
   const description = `Click on the link below to reset your password. The link will expire in 10 minutes.\n\n${resetURL}`;
@@ -167,26 +166,23 @@ export const forgotPassword = catchAsyncError(async (req, res) => {
   });
 });
 
-//reset password after recieving authToken and new password as input
+//reset password after recieving token and new password as input
 export const resetPassword = catchAsyncError(async (req, res) => {
-  const { authToken } = req.params; // Plain authToken from the URL
+  const { token } = req.params; // Plain token from the URL
   const { password } = req.body;
 
-  // Hash the incoming authToken to match the stored hashed authToken
-  const hashedauthToken = crypto
-    .createHash("sha256")
-    .update(authToken)
-    .digest("hex");
+  // Hash the incoming token to match the stored hashed token
+  const hashedtoken = crypto.createHash("sha256").update(token).digest("hex");
 
-  // Find user by hashed authToken and ensure the authToken is not expired
+  // Find user by hashed token and ensure the token is not expired
   let user = await SuperAdmin.findOne({
-    passwordResetauthToken: hashedauthToken,
-    passwordResetExpires: { $gt: Date.now() }, // Ensure authToken is still valid
+    passwordResettoken: hashedtoken,
+    passwordResetExpires: { $gt: Date.now() }, // Ensure token is still valid
   });
 
   if (!user) {
     user = await HotelOwner.findOne({
-      passwordResetauthToken: hashedauthToken,
+      passwordResettoken: hashedtoken,
       passwordResetExpires: { $gt: Date.now() },
     });
   }
@@ -194,12 +190,12 @@ export const resetPassword = catchAsyncError(async (req, res) => {
   if (!user) {
     return res
       .status(400)
-      .json({ status: "failed", message: "Invalid or expired authToken." });
+      .json({ status: "failed", message: "Invalid or expired token." });
   }
 
   // Update user's password
   user.password = password; // Assuming you have pre-save middleware to hash passwords
-  user.passwordResetauthToken = undefined; // Clear the reset authToken
+  user.passwordResettoken = undefined; // Clear the reset token
   user.passwordResetExpires = undefined; // Clear the expiration time
   await user.save();
 
