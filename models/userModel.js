@@ -4,7 +4,7 @@ import crypto from "crypto";
 
 /**
  * Base schema for all users.
- * Contains shared fields + password & reset token logic.
+ * Contains shared fields + password & reset authToken logic.
  */
 const userBaseSchema = new mongoose.Schema(
   {
@@ -75,7 +75,7 @@ const userBaseSchema = new mongoose.Schema(
       default: null,
     },
 
-    passwordResetToken: {
+    passwordResetauthToken: {
       type: String,
       default: null,
     },
@@ -108,38 +108,40 @@ userBaseSchema.methods.matchPassword = async function (enteredPassword) {
 };
 
 /**
- * Generate secure password reset token.
- * - Returns plain token for sending to user.
+ * Generate secure password reset authToken.
+ * - Returns plain authToken for sending to user.
  * - Stores hashed version in DB.
  */
-userBaseSchema.methods.createPasswordResetToken = function () {
-  const resetToken = crypto.randomBytes(32).toString("hex");
+userBaseSchema.methods.createPasswordResetauthToken = function () {
+  const resetauthToken = crypto.randomBytes(32).toString("hex");
 
-  this.passwordResetToken = crypto
+  this.passwordResetauthToken = crypto
     .createHash("sha256")
-    .update(resetToken)
+    .update(resetauthToken)
     .digest("hex");
 
   this.passwordResetExpires = Date.now() + 10 * 60 * 1000; // 10 minutes
 
-  return resetToken; // send this to user
+  return resetauthToken; // send this to user
 };
 
 /**
- * Validate a submitted password reset token.
+ * Validate a submitted password reset authToken.
  */
-userBaseSchema.methods.validatePasswordResetToken = function (submittedToken) {
-  if (!this.passwordResetToken || !this.passwordResetExpires) return false;
+userBaseSchema.methods.validatePasswordResetauthToken = function (
+  submittedauthToken
+) {
+  if (!this.passwordResetauthToken || !this.passwordResetExpires) return false;
 
   // expired?
   if (this.passwordResetExpires < Date.now()) return false;
 
-  const hashedToken = crypto
+  const hashedauthToken = crypto
     .createHash("sha256")
-    .update(submittedToken)
+    .update(submittedauthToken)
     .digest("hex");
 
-  return this.passwordResetToken === hashedToken;
+  return this.passwordResetauthToken === hashedauthToken;
 };
 
 /**

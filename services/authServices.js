@@ -2,7 +2,7 @@ import { ROLES, isValidRole } from "../utils/constant.js";
 import { User, SuperAdmin, HotelOwner } from "../models/userModel.js";
 import Hotel from "../models/hotelModel.js";
 import DevKey from "../models/devKeyModel.js";
-import { validateDevKey, generateToken } from "../utils/index.js";
+import { validateDevKey, generateauthToken } from "../utils/index.js";
 import { ClientError, ServerError } from "../utils/errorHandler.js";
 import bcrypt from "bcryptjs";
 import sendEmail from "../utils/sendEmail.js";
@@ -70,10 +70,10 @@ export const createUserWithRole = async (
 
     await newUser.save({ session });
 
-    // Generate token
-    const token = generateToken(newUser._id, newUser.role);
+    // Generate authToken
+    const authToken = generateauthToken(newUser._id, newUser.role);
 
-    return { newUser, token };
+    return { newUser, authToken };
   } catch (error) {
     if (error instanceof ClientError)
       throw new ClientError(error.name, error.message);
@@ -114,10 +114,10 @@ export const authenticateUser = async ({ email, password, role }) => {
       throw new ClientError("AuthError", "Invalid credentials");
     }
 
-    // Generate JWT token
-    const token = generateToken(user._id, user.role);
+    // Generate JWT authToken
+    const authToken = generateauthToken(user._id, user.role);
 
-    return { user, token };
+    return { user, authToken };
   } catch (error) {
     if (error instanceof ClientError)
       throw new ClientError(error.name, error.message);
