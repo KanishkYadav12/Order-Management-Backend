@@ -67,6 +67,7 @@ dotenv.config();
 
 export const protect = async (req, res, next) => {
   try {
+    console.log("IN Protect Middleware");
     const authHeader =
       req.headers["authorization"] || req.headers["Authorization"] || "";
     const token =
