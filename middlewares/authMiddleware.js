@@ -66,55 +66,77 @@ dotenv.config();
 // };
 
 export const protect = async (req, res, next) => {
-  let token;
-  console.log("IN Protect token : ", req.cookies);
-  if (req.cookies && req.cookies.authToken) {
-    token = req.cookies.authToken;
+  try {
+    const authHeader =
+      req.headers["authorization"] || req.headers["Authorization"] || "";
+    const token =
+      authHeader && authHeader.startsWith("Bearer ")
+        ? authHeader.split(" ")[1]
+        : null;
+
+    if (!token) {
+      console.log("No token found in Authorization header");
+      return next(new ClientError("Not authorized, no token", 401));
+    }
+
+    let decoded;
     try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      console.log("decoded role ", decoded);
-      if (decoded.role === ROLES.SUPER_ADMIN) {
-        req.user = await SuperAdmin.findById(decoded.id).select("-password");
-      } else if (decoded.role === ROLES.HOTEL_OWNER) {
-        req.user = await HotelOwner.findById(decoded.id).select("-password");
-      }
-
-      if (!req.user) {
-        return next(new ClientError("User not found", 401));
-      }
-
-      if (!req.user.isApproved) {
-        return next(new ClientError("User not approved", 401));
-      }
-
-      if (
-        req.user.role === ROLES.HOTEL_OWNER &&
-        (!req.user.membershipExpires || req.user.membershipExpires < new Date())
-      ) {
-        return next(new ClientError("Membership expired", 401));
-      }
-
-      next();
-    } catch (error) {
-      console.error("error", error);
-      if (error.name === "tokenExpiredError") {
+      // ✅ CHANGE THIS: Use ACCESS_TOKEN_SECRET instead of JWT_SECRET
+      decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+      console.log("IN Protect decoded : ", decoded);
+    } catch (err) {
+      console.error("JWT verify error:", err);
+      if (err.name === "TokenExpiredError") {
         return next(
           new ClientError("token has expired, please log in again", 401)
         );
       }
-
-      if (error instanceof jwt.JsonWebTokenError) {
+      if (err instanceof jwt.JsonWebTokenError) {
         return next(new ClientError("Not authorized, token failed", 401));
       }
-
-      next(new ServerError("Server error during authentication", 500));
+      return next(new ServerError("Server error during authentication", 500));
     }
-  } else {
-    console.log("else error here");
-    next(new ClientError("Not authorized, no token", 401));
+
+    const userId = decoded.sub || decoded.id || decoded._id;
+    const userRole = decoded.role;
+
+    if (!userId) {
+      return next(
+        new ClientError("Invalid token payload: missing user id", 401)
+      );
+    }
+
+    if (userRole === ROLES.SUPER_ADMIN) {
+      req.user = await SuperAdmin.findById(userId).select("-password");
+    } else if (userRole === ROLES.HOTEL_OWNER) {
+      req.user = await HotelOwner.findById(userId).select("-password");
+    } else {
+      req.user =
+        (await SuperAdmin.findById(userId).select("-password")) ||
+        (await HotelOwner.findById(userId).select("-password"));
+    }
+
+    if (!req.user) {
+      return next(new ClientError("User not found", 401));
+    }
+
+    if (!req.user.isApproved) {
+      return next(new ClientError("User not approved", 401));
+    }
+
+    if (
+      req.user.role === ROLES.HOTEL_OWNER &&
+      (!req.user.membershipExpires || req.user.membershipExpires < new Date())
+    ) {
+      return next(new ClientError("Membership expired", 401));
+    }
+
+    next();
+  } catch (err) {
+    console.error("protect middleware error:", err);
+    return next(new ServerError("Server error during authentication", 500));
   }
 };
-
 export const attachHotelId = (req, res, next) => {
   const { user } = req;
 
@@ -134,7 +156,6 @@ export const attachHotelId = (req, res, next) => {
   }
   next();
 };
-
 // Middleware to check if the logged-in user is a SuperAdmin
 export const superAdminOnly = (req, res, next) => {
   // Ensure only SuperAdmins can access this route

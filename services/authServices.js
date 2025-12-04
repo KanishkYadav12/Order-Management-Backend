@@ -83,7 +83,6 @@ export const createUserWithRole = async (
 
 export const authenticateUser = async ({ email, password, role }) => {
   try {
-    // Validate input
     if (!email || !password) {
       throw new ClientError(
         "ValidationError",
@@ -92,15 +91,11 @@ export const authenticateUser = async ({ email, password, role }) => {
     }
 
     const Model = role === ROLES.SUPER_ADMIN ? SuperAdmin : HotelOwner;
-
-    // Find user by email
     const user = await Model.findOne({ email });
-
     if (!user) {
       throw new ClientError("AuthError", "Invalid credentials");
     }
 
-    // Check approval status for hotel owners
     if (user.role === ROLES.HOTEL_OWNER && !user.isApproved) {
       throw new ClientError(
         "ApprovalError",
@@ -108,7 +103,6 @@ export const authenticateUser = async ({ email, password, role }) => {
       );
     }
 
-    // Compare passwords
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       throw new ClientError("AuthError", "Invalid credentials");

@@ -30,17 +30,14 @@ export const signUp = catchAsyncError(async (req, res, next, session) => {
   });
 }, true);
 
+// controllers/authController.js
 export const login = catchAsyncError(async (req, res) => {
   const { email, password, role } = req.body;
 
   const { user, token } = await authenticateUser({ email, password, role });
 
-  res.cookie("authToken", token, {
-    httpOnly: false,
-    sameSite: "None",
-    secure: true,
-    maxAge: 10 * 24 * 60 * 60 * 1000, // 10 days
-  });
+  // DO NOT set cookie for Authorization header flow.
+  // If you previously set cookies, remove that code.
 
   res.status(200).json({
     status: "success",
@@ -50,7 +47,7 @@ export const login = catchAsyncError(async (req, res) => {
       name: user.name,
       role: user.role,
       email: user.email,
-      token,
+      token, // client will store and send as Authorization: Bearer <token>
     },
   });
 });

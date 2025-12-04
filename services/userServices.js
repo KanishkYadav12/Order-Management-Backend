@@ -1,7 +1,6 @@
 import { ClientError, ServerError } from "../utils/index.js";
 import { HotelOwner, SuperAdmin } from "../models/userModel.js";
 import Hotel from "../models/hotelModel.js";
-import express from "express";
 import sendEmail from "../utils/sendEmail.js";
 
 export const getUserProfileService = async (userId) => {
@@ -158,7 +157,7 @@ export const membershipExtenderService = async (hotelOwnerId, days) => {
     effectiveExpiry.setDate(effectiveExpiry.getDate() + days);
 
     hotelOwner.membershipExpires = effectiveExpiry;
-    
+
     // expire member ship id days 0
     if (days == 0) {
       const today = new Date();
@@ -203,7 +202,7 @@ export const deleteHotelOwnerService = async (ownerId) => {
   }
 };
 
-//send hotelowner mail for membership expired 
+//send hotelowner mail for membership expired
 export const sendMailForMembershipExpiredService = async (hotelOwnerId) => {
   try {
     if (!hotelOwnerId) {
@@ -214,24 +213,30 @@ export const sendMailForMembershipExpiredService = async (hotelOwnerId) => {
     if (!hotelOwner) {
       throw new ClientError("NotFoundError", "Hotel owner not found");
     }
-    
+
     const membershipExpires = hotelOwner.membershipExpires;
-    if(membershipExpires > new Date()) {
+    if (membershipExpires > new Date()) {
       throw new ClientError("ConflictError", "Membership is not expired yet");
     }
 
-    //send mail to hotel owner for membership expired 
+    //send mail to hotel owner for membership expired
     const subject = "Membership Expired";
     const description = `Hello ${hotelOwner.name}, your membership has expired. Please renew your membership to continue enjoying our services.`;
     await sendEmail(hotelOwner.email, subject, description);
-    
-    return {hotelOwner, message: "Mail sent successfully",email: hotelOwner.email};  
 
+    return {
+      hotelOwner,
+      message: "Mail sent successfully",
+      email: hotelOwner.email,
+    };
   } catch (error) {
     if (error instanceof ClientError) {
       throw new error();
     } else {
-      throw new ServerError("Error while sending mail for membership expired", error);
+      throw new ServerError(
+        "Error while sending mail for membership expired",
+        error
+      );
     }
   }
 };
