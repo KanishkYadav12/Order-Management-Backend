@@ -1,242 +1,226 @@
-import { ClientError, ServerError } from "../utils/index.js";
 import { HotelOwner, SuperAdmin } from "../models/userModel.js";
 import Hotel from "../models/hotelModel.js";
-import sendEmail from "../utils/sendEmail.js";
+import { ROLES } from "../utils/constant.js";
+import {
+  ClientError,
+  NotFoundError,
+  ValidationError,
+} from "../utils/errorHandler.js";
+import { sendMembershipExpiredEmail } from "../utils/sendEmail.js";
+import logger from "../utils/logger.js";
 
 export const getUserProfileService = async (userId) => {
-  try {
-    if (!userId) {
-      throw new ClientError("ValidationError", "User ID is required");
-    }
-    const hotelOwner = await HotelOwner.findById(userId).select("-password");
-    const hotel = hotelOwner ? await Hotel.findById(hotelOwner.hotelId) : null;
+  if (!userId) throw new ValidationError("Missing user id.");
 
-    if (hotelOwner) {
-      hotelOwner._doc.hotelName = hotel ? hotel.name : null;
-    }
+  const user =
+    (await HotelOwner.findById(userId)) ?? (await SuperAdmin.findById(userId));
 
-    const superAdmin = await SuperAdmin.findById(userId).select("-password");
-    if (!hotelOwner && !superAdmin) {
-      throw new ClientError("NotFoundError", "User not found");
-    }
+  if (!user) throw new NotFoundError("User");
 
-    return hotelOwner || superAdmin;
-  } catch (error) {
-    throw new ServerError("Error while fetching user profile");
+  // Attach the restaurant name the dashboard header displays. Uses a plain
+  // object rather than mutating `_doc`, which bypassed the toJSON transform
+  // that strips secrets.
+  const profile = user.toJSON();
+
+  if (user.hotelId) {
+    const hotel = await Hotel.findById(user.hotelId).select("name logo billing");
+    profile.hotelName = hotel?.name ?? null;
+    profile.hotel = hotel ?? null;
   }
+
+  return profile;
 };
 
+/**
+ * Approves or un-approves a restaurant owner.
+ *
+ * This used to create a brand-new Hotel on every call. Because approval is a
+ * toggle, approving twice created two restaurants and orphaned the first —
+ * along with its menu and tables. The hotel is created once at signup now, so
+ * this only backfills for accounts that predate that change.
+ */
 export const approveHotelOwnerService = async (ownerId, session) => {
-  if (!ownerId) {
-    throw new ClientError("ValidationError", "Owner ID is required");
+  const owner = await HotelOwner.findById(ownerId).session(session);
+  if (!owner) throw new NotFoundError("Restaurant owner");
+
+  owner.isApproved = !owner.isApproved;
+
+  if (!owner.hotelId) {
+    const [hotel] = await Hotel.create(
+      [
+        {
+          name: `${owner.name}'s Restaurant`,
+          location: "",
+          ownerId: owner._id,
+        },
+      ],
+      { session }
+    );
+    owner.hotelId = hotel._id;
+    logger.info(
+      { ownerId: owner._id.toString(), hotelId: hotel._id.toString() },
+      "backfilled hotel for legacy owner"
+    );
   }
 
-  const hotelOwner = await HotelOwner.findById(ownerId).session(session);
-  if (!hotelOwner) {
-    throw new ClientError("NotFoundError", "Hotel owner not found");
+  // A newly approved owner with no subscription gets a 14-day trial, so an
+  // approved account is never immediately blocked by the membership check.
+  if (owner.isApproved && !owner.membershipExpires) {
+    owner.membershipExpires = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
   }
 
-  // if (hotelOwner.isApproved) {
-  //   throw new ClientError("ConflictError", "Hotel owner is already approved");
-  // }
+  await owner.save({ session });
 
-  hotelOwner.isApproved = !hotelOwner.isApproved;
-
-  const hotel = new Hotel({
-    name: `${hotelOwner.name}'s Hotel`,
-    location: "Default Location",
-    ownerId: hotelOwner._id,
-  });
-
-  await hotel.save({ session });
-  hotelOwner.hotelId = hotel._id;
-
-  await hotelOwner.save({ session });
-
-  return await HotelOwner.findById(ownerId)
-    .populate("hotelId")
-    .session(session);
+  return HotelOwner.findById(ownerId).populate("hotelId").session(session);
 };
 
-export const getAllHotelOwnersService = async () => {
-  try {
-    const hotelOwners = await HotelOwner.find().select("-password");
+/** Paged owner list. An empty result is a valid answer, not an error. */
+const listOwners = async (filter, { page = 1, limit = 10, search } = {}) => {
+  const query = { ...filter, role: ROLES.HOTEL_OWNER };
 
-    if (!hotelOwners || hotelOwners.length === 0) {
-      throw new ClientError("NotFoundError", "No hotel owners found");
-    }
-
-    return hotelOwners;
-  } catch (error) {
-    if (error instanceof ClientError) {
-      throw error;
-    } else throw new ServerError("Error while fetching all hotels owners");
+  if (search) {
+    const escaped = String(search).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    query.$or = [
+      { name: { $regex: escaped, $options: "i" } },
+      { email: { $regex: escaped, $options: "i" } },
+    ];
   }
+
+  const [owners, total] = await Promise.all([
+    HotelOwner.find(query)
+      .populate("hotelId", "name location isActive")
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(Number(limit)),
+    HotelOwner.countDocuments(query),
+  ]);
+
+  return {
+    owners,
+    pagination: {
+      total,
+      page: Number(page),
+      limit: Number(limit),
+      totalPages: Math.ceil(total / limit) || 1,
+    },
+  };
 };
 
-export const getUnApprovedOwnersService = async ({ page = 1, limit = 10 }) => {
-  try {
-    const skip = (page - 1) * limit;
-
-    // Find pending hotels and return data
-    const unApprovedOwners = await HotelOwner.find({ isApproved: false })
-      .select("-password")
-      .skip(skip)
-      .limit(Number(limit)); // Ensure limit is a number
-
-    // Get the total number of pending hotels
-    const totalUnApprovedOwners = await HotelOwner.countDocuments({
-      isApproved: false,
-    });
-
-    return {
-      unApprovedOwners,
-      pagination: {
-        total: totalUnApprovedOwners,
-        page: Number(page),
-        totalPages: Math.ceil(totalUnApprovedOwners / limit),
-        limit: Number(limit),
-      },
-    };
-  } catch (error) {
-    if (error instanceof ClientError) {
-      throw error;
-    } else
-      throw new ServerError("Error while fetching unapproved hotel owners");
-  }
+export const getAllHotelOwnersService = async (options = {}) => {
+  const { owners, pagination } = await listOwners({}, options);
+  return { hotelOwners: owners, pagination };
 };
 
-export const getApprovedOwnersService = async ({ page = 1, limit = 10 }) => {
-  try {
-    const skip = (page - 1) * limit;
-
-    // Find approved hotel owners and return data
-    const approvedOwners = await HotelOwner.find({ isApproved: true })
-      .select("-password")
-      .skip(skip)
-      .limit(Number(limit)); // Ensure limit is a number
-
-    // Get the total number of approved hotel owners
-    const totalApprovedOwners = await HotelOwner.countDocuments({
-      isApproved: true,
-    });
-
-    return {
-      approvedOwners,
-      pagination: {
-        total: totalApprovedOwners,
-        page: Number(page),
-        totalPages: Math.ceil(totalApprovedOwners / limit),
-        limit: Number(limit),
-      },
-    };
-  } catch (error) {
-    if (error instanceof ClientError) {
-      throw error;
-    } else throw new ServerError("Error while fetching approved hotel owners");
-  }
+export const getUnApprovedOwnersService = async (options) => {
+  const { owners, pagination } = await listOwners({ isApproved: false }, options);
+  return { unApprovedOwners: owners, pagination };
 };
+
+export const getApprovedOwnersService = async (options) => {
+  const { owners, pagination } = await listOwners({ isApproved: true }, options);
+  return { approvedOwners: owners, pagination };
+};
+
+/**
+ * Extends a subscription by `days`, counting from whichever is later: today
+ * or the current expiry. Passing 0 expires the account immediately.
+ */
 export const membershipExtenderService = async (hotelOwnerId, days) => {
-  try {
-    if (!hotelOwnerId) {
-      throw new ClientError("ValidationError", "Owner ID is required");
-    }
-    const hotelOwner = await HotelOwner.findById(hotelOwnerId);
+  const owner = await HotelOwner.findById(hotelOwnerId);
+  if (!owner) throw new NotFoundError("Restaurant owner");
 
-    if (!hotelOwner) {
-      throw new ClientError("NotFoundError", "Hotel owner not found");
-    }
+  const parsedDays = Number(days);
+  if (!Number.isInteger(parsedDays) || parsedDays < 0) {
+    throw new ValidationError("Enter a whole number of days.");
+  }
 
+  if (parsedDays === 0) {
+    owner.membershipExpires = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  } else {
     const now = new Date();
-    const currentExpiry = hotelOwner.membershipExpires
-      ? new Date(hotelOwner.membershipExpires)
+    const current = owner.membershipExpires
+      ? new Date(owner.membershipExpires)
       : null;
-
-    const effectiveExpiry =
-      currentExpiry && currentExpiry > now ? currentExpiry : now;
-    effectiveExpiry.setDate(effectiveExpiry.getDate() + days);
-
-    hotelOwner.membershipExpires = effectiveExpiry;
-
-    // expire member ship id days 0
-    if (days == 0) {
-      const today = new Date();
-      const yesterday = new Date(today);
-      yesterday.setDate(today.getDate() - 1);
-      hotelOwner.membershipExpires = yesterday;
-    }
-
-    await hotelOwner.save();
-
-    return hotelOwner; // Return the updated hotel owner
-  } catch (error) {
-    if (error instanceof ClientError) {
-      throw new error();
-    } else {
-      throw new ServerError("Error while extending membership", error);
-    }
+    const base = current && current > now ? current : now;
+    base.setDate(base.getDate() + parsedDays);
+    owner.membershipExpires = base;
   }
+
+  await owner.save({ validateBeforeSave: false });
+
+  logger.info(
+    {
+      ownerId: owner._id.toString(),
+      days: parsedDays,
+      expiresAt: owner.membershipExpires,
+    },
+    "membership updated"
+  );
+
+  return owner;
 };
 
+/**
+ * Suspends an owner and deactivates their restaurant.
+ *
+ * A hard delete would orphan every bill, order and table referencing them,
+ * and destroy the sales record. `hotelOwner.remove()` also no longer exists
+ * in Mongoose 8, so the previous implementation threw at runtime.
+ */
 export const deleteHotelOwnerService = async (ownerId) => {
-  try {
-    if (!ownerId) {
-      throw new ClientError("ValidationError", "Owner ID is required");
-    }
+  const owner = await HotelOwner.findById(ownerId);
+  if (!owner) throw new NotFoundError("Restaurant owner");
 
-    const hotelOwner = await HotelOwner.findById(ownerId);
+  owner.isSuspended = true;
+  owner.isApproved = false;
+  owner.refreshTokens = [];
+  owner.tokensValidFrom = new Date();
+  await owner.save({ validateBeforeSave: false });
 
-    if (!hotelOwner) {
-      throw new ClientError("NotFoundError", "Hotel owner not found");
-    }
-
-    await hotelOwner.remove();
-
-    return hotelOwner;
-  } catch (error) {
-    if (error instanceof ClientError) {
-      throw new error();
-    } else {
-      throw new ServerError("Error while deleting hotel owner", error);
-    }
+  if (owner.hotelId) {
+    await Hotel.updateOne({ _id: owner.hotelId }, { isActive: false });
   }
+
+  logger.warn({ ownerId: owner._id.toString() }, "owner suspended");
+  return owner;
 };
 
-//send hotelowner mail for membership expired
 export const sendMailForMembershipExpiredService = async (hotelOwnerId) => {
-  try {
-    if (!hotelOwnerId) {
-      throw new ClientError("ValidationError", "Owner ID is required");
-    }
+  const owner = await HotelOwner.findById(hotelOwnerId);
+  if (!owner) throw new NotFoundError("Restaurant owner");
 
-    const hotelOwner = await HotelOwner.findById(hotelOwnerId);
-    if (!hotelOwner) {
-      throw new ClientError("NotFoundError", "Hotel owner not found");
-    }
-
-    const membershipExpires = hotelOwner.membershipExpires;
-    if (membershipExpires > new Date()) {
-      throw new ClientError("ConflictError", "Membership is not expired yet");
-    }
-
-    //send mail to hotel owner for membership expired
-    const subject = "Membership Expired";
-    const description = `Hello ${hotelOwner.name}, your membership has expired. Please renew your membership to continue enjoying our services.`;
-    await sendEmail(hotelOwner.email, subject, description);
-
-    return {
-      hotelOwner,
-      message: "Mail sent successfully",
-      email: hotelOwner.email,
-    };
-  } catch (error) {
-    if (error instanceof ClientError) {
-      throw new error();
-    } else {
-      throw new ServerError(
-        "Error while sending mail for membership expired",
-        error
-      );
-    }
+  if (owner.membershipExpires && owner.membershipExpires > new Date()) {
+    throw new ClientError(
+      "This subscription hasn't expired yet.",
+      409,
+      "MEMBERSHIP_ACTIVE"
+    );
   }
+
+  const expiredOn = owner.membershipExpires
+    ? new Date(owner.membershipExpires).toLocaleDateString("en-IN", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      })
+    : "an earlier date";
+
+  await sendMembershipExpiredEmail(owner.email, { name: owner.name, expiredOn });
+
+  return { email: owner.email, message: "Reminder sent" };
+};
+
+/** Profile self-update. Never touches role, approval or hotel. */
+export const updateOwnProfileService = async (userId, role, updates) => {
+  const Model = role === ROLES.SUPER_ADMIN ? SuperAdmin : HotelOwner;
+
+  const user = await Model.findById(userId);
+  if (!user) throw new NotFoundError("User");
+
+  for (const field of ["name", "logo", "gender", "phone"]) {
+    if (updates[field] !== undefined) user[field] = updates[field];
+  }
+
+  await user.save({ validateBeforeSave: false });
+  return user;
 };

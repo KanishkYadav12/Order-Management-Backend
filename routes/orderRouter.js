@@ -1,40 +1,115 @@
-import { attachHotelId, protect, superAdminOnly, validateOwnership } from "../middlewares/authMiddleware.js";
+import express from "express";
 import {
-    createOrder,
-    onQRScan,
-    deleteOrder,
-    getOrderDetails,
-    publishOrder,
-    getAllOrders,
-    updateStatus,
-    updateOrderByOwner
-} from '../controllers/orderController.js';
-import express from 'express';
+  protect,
+  attachHotelId,
+  authorize,
+} from "../middlewares/authMiddleware.js";
+import { staffOrCustomer } from "../middlewares/staffOrCustomer.js";
+import { optionalCustomerSession } from "../middlewares/customerSession.js";
+import { validate } from "../middlewares/validate.js";
+import { customerOrderLimiter } from "../middlewares/security.js";
+import { PERMISSIONS } from "../utils/constant.js";
+import {
+  createOrder,
+  onQRScan,
+  deleteOrder,
+  getOrderDetails,
+  publishOrder,
+  getAllOrders,
+  updateStatus,
+  updateOrderByOwner,
+} from "../controllers/orderController.js";
+import {
+  createOrderSchema,
+  updateOrderItemsSchema,
+  orderIdSchema,
+  updateStatusSchema,
+  listOrdersSchema,
+  tableIdParamSchema,
+} from "../validators/order.js";
 
 const router = express.Router();
 
-// for customer on scanning QR
-router.get('/', protect, attachHotelId, getAllOrders)
+/* ── Customer flow ────────────────────────────────────────────────────────
+   The QR scan is the only genuinely public route. It hands back a signed
+   session bound to one table, which the routes below then require. */
 
-router.get('/qr-scan/:tableId', onQRScan);
+router.get(
+  "/qr-scan/:tableId",
+  customerOrderLimiter,
+  validate(tableIdParamSchema),
+  onQRScan
+);
 
-router.post('/publish/:orderId', publishOrder);
+router.post(
+  "/qr-scan/:tableId",
+  customerOrderLimiter,
+  validate(tableIdParamSchema),
+  onQRScan
+);
 
-// for customer and hotel owner 
-router.post('/:tableId', createOrder);
+/** Diner with a table session, or staff taking the order at the table. */
+router.post(
+  "/:tableId",
+  customerOrderLimiter,
+  staffOrCustomer,
+  validate(createOrderSchema),
+  createOrder
+);
 
-//for update order by owner
-router.put('/owner/:orderId', protect, validateOwnership, updateOrderByOwner);
+router.post(
+  "/publish/:orderId",
+  customerOrderLimiter,
+  staffOrCustomer,
+  validate(orderIdSchema),
+  publishOrder
+);
 
-// for updating order status
-router.patch('/:orderId/:status', protect, validateOwnership, updateStatus);
+/** Readable by the owning hotel's staff, or by the diner at that table. */
+router.get(
+  "/details/:orderId",
+  optionalCustomerSession,
+  staffOrCustomer,
+  validate(orderIdSchema),
+  getOrderDetails
+);
 
-// for hotel owner to fetch order by id
-router.get('/details/:orderId', getOrderDetails);
+/* ── Staff only ───────────────────────────────────────────────────────── */
 
-// for hotel owner delete customer order on request
-router.delete('/:orderId', protect, validateOwnership, deleteOrder);
+router.get(
+  "/",
+  protect,
+  attachHotelId,
+  authorize(PERMISSIONS.ORDER_READ),
+  validate(listOrdersSchema),
+  getAllOrders
+);
 
+router.put(
+  "/owner/:orderId",
+  protect,
+  attachHotelId,
+  authorize(PERMISSIONS.ORDER_WRITE),
+  validate(updateOrderItemsSchema),
+  updateOrderByOwner
+);
 
+router.patch(
+  "/:orderId/:status",
+  protect,
+  attachHotelId,
+  authorize(PERMISSIONS.ORDER_STATUS),
+  validate(updateStatusSchema),
+  updateStatus
+);
+
+router.delete(
+  "/:orderId",
+  protect,
+  attachHotelId,
+  authorize(PERMISSIONS.ORDER_DELETE),
+  validate(orderIdSchema),
+  deleteOrder
+);
 
 export default router;

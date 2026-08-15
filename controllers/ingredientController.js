@@ -1,100 +1,116 @@
-import { getIngredientByIdService, syncIngredientsFromSourceToDestinationService, getAllIngredientsService, createIngredientService, deleteIngredientService, getIngredientsByHotelService , updateIngredientService ,createMultipleIngredientsService } from "../services/ingredientServices.js";
 import { catchAsyncError } from "../middlewares/catchAsyncError.js";
+import {
+  getIngredientByIdService,
+  syncIngredientsFromSourceToDestinationService,
+  createIngredientService,
+  deleteIngredientService,
+  getIngredientsByHotelService,
+  getLowStockIngredientsService,
+  updateIngredientService,
+  createMultipleIngredientsService,
+} from "../services/ingredientServices.js";
 
 export const getIngredientById = catchAsyncError(async (req, res) => {
-    const ingredientId = req.params.ingredientId;
+  const ingredient = await getIngredientByIdService(
+    req.params.ingredientId,
+    req.hotelId
+  );
 
-    // Call the service to get ingredient details
-    const ingredient = await getIngredientByIdService(ingredientId);
-
-    res.status(200).json({
-        status: "success",
-        message: 'Ingredient details fetched successfully',
-        data: { ingredient },
-    });
+  res.status(200).json({
+    status: "success",
+    message: "Ingredient loaded",
+    data: { ingredient },
+  });
 });
 
 export const createIngredient = catchAsyncError(async (req, res) => {
-    const ingredientData = req.body;
-    const ingredient = await createIngredientService(req.user.hotelId, ingredientData);
-    res.status(201).json({
-        status: "success",
-        message: 'Ingredient created successfully',
-        data: { ingredient },
-    });
+  const ingredient = await createIngredientService(req.hotelId, req.body);
+
+  res.status(201).json({
+    status: "success",
+    message: "Ingredient created",
+    data: { ingredient },
+  });
 });
 
 export const createMultipleIngredients = catchAsyncError(async (req, res) => {
+  const ingredients = await createMultipleIngredientsService(
+    req.hotelId,
+    req.body.ingredients
+  );
 
-    // Extract ingredients array from the request body
-    const { ingredients } = req.body;
-
-    // Check if ingredients array is provided and is valid
-    if (!ingredients || !Array.isArray(ingredients) || ingredients.length === 0) {
-        throw new ClientError('Ingredients data is required and should be an array', 400);
-    }
-
-    // Call the service function to create multiple ingredients, passing the hotelId and ingredients
-    const createdIngredients = await createMultipleIngredientsService(req.user.hotelId, ingredients);
-
-    // Send the response with the created ingredients
-    res.status(201).json({
-        status: 'success',
-        message: 'Ingredients created successfully',
-        data: { ingredients: createdIngredients },
-    });
+  res.status(201).json({
+    status: "success",
+    message: `${ingredients.length} ingredients created`,
+    data: { ingredients },
+  });
 });
+
 export const updateIngredient = catchAsyncError(async (req, res) => {
-    const ingredientId = req.params.ingredientId;
-    const ingredientData = req.body;
-    const ingredient = await updateIngredientService(ingredientId, ingredientData);
-    res.status(200).json({
-        status: "success",
-        message: 'Ingredient updated successfully',
-        data: { ingredient },
-    });
-});
+  const ingredient = await updateIngredientService(
+    req.params.ingredientId,
+    req.hotelId,
+    req.body
+  );
 
+  res.status(200).json({
+    status: "success",
+    message: "Ingredient updated",
+    data: { ingredient },
+  });
+});
 
 export const deleteIngredient = catchAsyncError(async (req, res) => {
-    const ingredientId = req.params.ingredientId;
-    const ingredient = await deleteIngredientService(ingredientId);
-    res.status(200).json({
-        status: "success",
-        message: 'Ingredient deleted successfully',
-        data : {ingredient}
-    });
-});
+  const ingredient = await deleteIngredientService(
+    req.params.ingredientId,
+    req.hotelId
+  );
 
-export const getAllIngredients = catchAsyncError(async (req, res) => {
-    // Call the service to fetch all ingredients
-    const ingredients = await getAllIngredientsService();
-    res.status(200).json({
-        status: "success",
-        message: 'All ingredients fetched successfully',
-        data: { ingredients },
-    });
+  res.status(200).json({
+    status: "success",
+    message: "Ingredient removed",
+    data: { ingredient },
+  });
 });
 
 export const getIngredientsByHotel = catchAsyncError(async (req, res) => {
-    const ingredients = await getIngredientsByHotelService(req.user.hotelId);
-    res.status(200).json({
-        status: "success",
-        message: 'All ingredients of hotel fetched successfully',
-        data: { ingredients },
-    });
+  const ingredients = await getIngredientsByHotelService(req.hotelId, {
+    includeDeleted: req.query.includeDeleted === "true",
+  });
+
+  res.status(200).json({
+    status: "success",
+    message: "Ingredients loaded",
+    data: { ingredients },
+  });
 });
 
-export const syncIngredientsFromSourceToDestination = catchAsyncError(async (req, res) => {
+/** Powers the low-stock warning on the dashboard. */
+export const getLowStockIngredients = catchAsyncError(async (req, res) => {
+  const ingredients = await getLowStockIngredientsService(req.hotelId);
+
+  res.status(200).json({
+    status: "success",
+    message: "Low stock ingredients loaded",
+    data: { ingredients, count: ingredients.length },
+  });
+});
+
+export const syncIngredientsFromSourceToDestination = catchAsyncError(
+  async (req, res) => {
     const { source, destination } = req.body;
-    await syncIngredientsFromSourceToDestinationService(source, destination);
+    const ingredients = await syncIngredientsFromSourceToDestinationService(
+      source,
+      destination
+    );
+
     res.status(200).json({
-        status : "success",
-        message: `Ingredients cloned successfully from ${destination} to ${source}`,
+      status: "success",
+      message: `${ingredients.length} ingredients copied`,
+      data: { ingredients },
     });
-});
+  }
+);
 
-
-
-
-
+/** Kept as an alias so any existing import of this name still resolves. */
+export const getAllIngredients = getIngredientsByHotel;

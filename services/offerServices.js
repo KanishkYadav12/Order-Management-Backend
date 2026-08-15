@@ -1,172 +1,197 @@
 import Offer from "../models/offerModel.js";
 import { Dish } from "../models/dishModel.js";
-import { ClientError } from "../utils/errorHandler.js";
+import {
+  ClientError,
+  NotFoundError,
+  ValidationError,
+} from "../utils/errorHandler.js";
 
-export const createOfferService = async (offerData, session) => {
-    const { hotelId, name, value, type, discountType, description, appliedOn, disable, startDate, endDate, appliedAbove } = offerData;
-
-    let dishDetails = null;
-
-    // Validate `value` for discount type
-    if (value < 0) {
-        throw new ClientError("Value must not be less than 0!");
-    }
-
-    if (discountType === "percent" && value > 100) {
-        throw new ClientError("Value must be between 0 and 100 for discount type percent!");
-    }
-
-    if (type === "specific") {
-        // if (appliedAbove) {
-        //     throw new ClientError("Applied above condition will not work for specific type of offer!");
-        // }
-
-        // Fetch dishes belonging to the given hotel and matching the provided IDs
-        dishDetails = await Dish.find({ _id: { $in: appliedOn }, hotelId }).session(session);
-        if (!dishDetails || !dishDetails.length) {
-            throw new ClientError("No valid dishes found for the provided IDs to apply offer!");
-        }
-
-        // Check if any dish already has an offer applied
-        const dishesWithOffer = dishDetails.filter(dish => dish.offer);
-        if (dishesWithOffer.length > 0) {
-            const dishIdsWithOffer = dishesWithOffer.map(dish => dish._id);
-            throw new ClientError(`Some provided dishes are already associated with other offers!`);
-        }
-
-        // to ensure only valid dish pass into applied On
-        const validDishIds = dishDetails.map(dish => dish._id);
-        offerData.appliedOn = validDishIds;
-    } else {
-        offerData.appliedOn = [];
-    }
-
-    // Create the offer document
-    const offer = await Offer.create({ ...offerData, session });
-
-    if (dishDetails && dishDetails.length) {
-        // Update all the fetched dishes with the new offer's ID in the offer field
-        const offerId = offer._id; // Since `create` returns an array when used with transactions
-        await Dish.updateMany(
-            { _id: { $in: dishDetails.map(dish => dish._id) } },
-            { $set: { offer: offerId } },
-            { session }
-        );
-    }
-
-    return offer; // Return the created offer document
+const assertScope = (hotelId) => {
+  if (!hotelId) {
+    throw new ClientError(
+      "Your account is not linked to a restaurant yet.",
+      409,
+      "NO_HOTEL_LINKED"
+    );
+  }
 };
 
-export const updateOfferService = async (offerId, updatedData, session) => {
-    const { name, value, type, discountType, disable, description, appliedAbove, startDate, endDate, logo  } = updatedData;
-    let appliedOn = updatedData.appliedOn;
-
-    // Fetch the existing offer
-    const existingOffer = await Offer.findById(offerId).session(session);
-    if (!existingOffer) {
-        throw new ClientError('Offer not found!');
-    }
-
-    // Validate `value` is not less than 0
-    if (value < 0) {
-        throw new ClientError("Value must not be less than 0!");
-    }
-
-    // Determine the applicable discountType for validation
-    const effectiveDiscountType = discountType || existingOffer.discountType;
-
-    // Validate `value` for percent type
-    if (effectiveDiscountType === "percent" && value > 100) {
-        throw new ClientError("Value must be between 0 and 100 for discount type percent!");
-    }
-
-    // Validate `appliedAbove` for specific type
-    if ((type && type === "specific") || (!type && existingOffer.type === "specific")) {
-        if (appliedAbove) {
-            //throw new ClientError('Applied above condition will not work for specific type of offer!');
-        }
-    }
-
-    let dishDetails = null;
-
-    // Handle validation for specific type and appliedOn
-    if (type === "specific") {
-        dishDetails = await Dish.find({ _id: { $in: appliedOn }, hotelId: existingOffer.hotelId }).session(session);
-        if (!dishDetails || !dishDetails.length) {
-            throw new ClientError('No valid dishes found for the provided IDs to apply the offer!');
-        }
-        const validDishIds = dishDetails.map(dish => dish._id);
-        appliedOn = validDishIds;
-    }
-
-    // Remove offer from previously associated dishes if type or appliedOn changes
-    if (existingOffer.type === "specific" && existingOffer.appliedOn && existingOffer.appliedOn.length > 0) {
-        await Dish.updateMany(
-            { _id: { $in: existingOffer.appliedOn }, offer: offerId },
-            { $unset: { offer: "" } },
-            { session }
-        );
-    }
-
-    if (dishDetails && dishDetails.length) {
-        // Update the dishes with the new offer's ID
-        await Dish.updateMany(
-            { _id: { $in: dishDetails.map(dish => dish._id) } },
-            { $set: { offer: offerId } },
-            { session }
-        );
-    }
-
-    // Construct the update object explicitly
-    const updateFields = {};
-    if (name !== undefined) updateFields.name = name;
-    if (value !== undefined) updateFields.value = value;
-    if (type !== undefined) updateFields.type = type;
-    if (disable !== undefined) updateFields.disable = disable;
-    if (description !== undefined) updateFields.description = description;
-    if (discountType !== undefined) updateFields.discountType = discountType;
-    if (startDate !== undefined) updateFields.startDate = startDate;
-    if (endDate !== undefined) updateFields.endDate = endDate;
-    if(logo) updateFields.logo = logo
-    if (type === "specific") {
-        updateFields.appliedOn = appliedOn;
-    } else if (type === "global") {
-        updateFields.appliedOn = [];
-        if (appliedAbove !== undefined) {
-            updateFields.appliedAbove = appliedAbove;
-        }
-    }
-
-
-    // Update the offer document with the provided data
-    const updatedOffer = await Offer.findByIdAndUpdate(
-        offerId,
-        updateFields,
-        { new: true, session }
-    ).populate('appliedOn');
-
-    return updatedOffer;
+/** Shared rules for both create and update. */
+const validateOfferShape = ({ value, discountType, type, appliedOn }) => {
+  if (value !== undefined && value < 0) {
+    throw new ValidationError("A discount can't be negative.");
+  }
+  if (discountType === "percent" && value > 100) {
+    throw new ValidationError("A percentage discount can't exceed 100%.");
+  }
+  if (type === "specific" && (!appliedOn || appliedOn.length === 0)) {
+    throw new ValidationError("Choose at least one dish for this offer.");
+  }
 };
 
-export const deleteOfferService = async (offerId, session) => {
-    // Fetch the offer with the given ID
-    const offer = await Offer.findById(offerId).session(session);
-    if (!offer) {
-        throw new ClientError('Offer not found!');
+export const createOfferService = async (hotelId, offerData, session) => {
+  assertScope(hotelId);
+  validateOfferShape(offerData);
+
+  let dishes = [];
+
+  if (offerData.type === "specific") {
+    dishes = await Dish.find({
+      _id: { $in: offerData.appliedOn },
+      hotelId,
+      isDeleted: false,
+    }).session(session);
+
+    if (dishes.length === 0) {
+      throw new ClientError(
+        "None of those dishes are on your menu.",
+        400,
+        "NO_VALID_DISHES"
+      );
     }
 
-    if (offer.type === 'specific' && offer.appliedOn && offer.appliedOn.length > 0) {
-        // Fetch all dishes that have the offer applied
-        // const dishIds = offer.appliedOn.map(dish => dish._id);
-        await Dish.updateMany(
-            { _id: { $in: offer.appliedOn }, offer: offerId },
-            { $unset: { offer: "" } }, // Removes the offer field
-            { session }
-        );
+    const alreadyDiscounted = dishes.filter((dish) => dish.offer);
+    if (alreadyDiscounted.length > 0) {
+      throw new ClientError(
+        `${alreadyDiscounted.map((d) => d.name).join(", ")} already ${alreadyDiscounted.length === 1 ? "has" : "have"} an offer. Remove it first.`,
+        409,
+        "DISH_ALREADY_DISCOUNTED"
+      );
+    }
+  }
+
+  // `Offer.create({ ...data, session })` wrote `session` into the document as
+  // a field and ran outside the transaction. The array form with an options
+  // object is the correct way to create inside a session.
+  const [offer] = await Offer.create(
+    [
+      {
+        ...offerData,
+        hotelId,
+        appliedOn: offerData.type === "specific" ? dishes.map((d) => d._id) : [],
+      },
+    ],
+    { session }
+  );
+
+  if (dishes.length > 0) {
+    await Dish.updateMany(
+      { _id: { $in: dishes.map((d) => d._id) }, hotelId },
+      { $set: { offer: offer._id } },
+      { session }
+    );
+  }
+
+  return Offer.findById(offer._id).populate("appliedOn").session(session);
+};
+
+export const updateOfferService = async (
+  offerId,
+  hotelId,
+  updatedData,
+  session
+) => {
+  assertScope(hotelId);
+
+  const existing = await Offer.findOne({ _id: offerId, hotelId }).session(session);
+  if (!existing) throw new NotFoundError("Offer");
+
+  const nextType = updatedData.type ?? existing.type;
+  const nextDiscountType = updatedData.discountType ?? existing.discountType;
+  const nextValue = updatedData.value ?? existing.value;
+
+  validateOfferShape({
+    value: nextValue,
+    discountType: nextDiscountType,
+    type: nextType,
+    appliedOn: updatedData.appliedOn ?? existing.appliedOn,
+  });
+
+  // Detach from the dishes this offer currently covers, so a dish never keeps
+  // pointing at an offer that no longer applies to it.
+  if (existing.appliedOn?.length > 0) {
+    await Dish.updateMany(
+      { _id: { $in: existing.appliedOn }, hotelId, offer: offerId },
+      { $set: { offer: null } },
+      { session }
+    );
+  }
+
+  let nextAppliedOn = [];
+
+  if (nextType === "specific") {
+    const dishes = await Dish.find({
+      _id: { $in: updatedData.appliedOn ?? existing.appliedOn },
+      hotelId,
+      isDeleted: false,
+    }).session(session);
+
+    if (dishes.length === 0) {
+      throw new ClientError(
+        "None of those dishes are on your menu.",
+        400,
+        "NO_VALID_DISHES"
+      );
     }
 
-    // Delete the offer
-    await Offer.deleteOne({ _id: offerId }, { session });
+    nextAppliedOn = dishes.map((dish) => dish._id);
 
-    return offer;
+    await Dish.updateMany(
+      { _id: { $in: nextAppliedOn }, hotelId },
+      { $set: { offer: offerId } },
+      { session }
+    );
+  }
+
+  const { hotelId: _ignored, _id: _ignoredId, ...safeData } = updatedData;
+
+  const offer = await Offer.findOneAndUpdate(
+    { _id: offerId, hotelId },
+    { ...safeData, type: nextType, appliedOn: nextAppliedOn },
+    { new: true, runValidators: true, session }
+  ).populate("appliedOn");
+
+  return offer;
+};
+
+export const deleteOfferService = async (offerId, hotelId, session) => {
+  assertScope(hotelId);
+
+  const offer = await Offer.findOne({ _id: offerId, hotelId }).session(session);
+  if (!offer) throw new NotFoundError("Offer");
+
+  if (offer.appliedOn?.length > 0) {
+    await Dish.updateMany(
+      { _id: { $in: offer.appliedOn }, hotelId, offer: offerId },
+      { $set: { offer: null } },
+      { session }
+    );
+  }
+
+  await Offer.deleteOne({ _id: offerId, hotelId }).session(session);
+  return offer;
+};
+
+export const getOfferByIdService = async (offerId, hotelId) => {
+  assertScope(hotelId);
+  const offer = await Offer.findOne({ _id: offerId, hotelId }).populate("appliedOn");
+  if (!offer) throw new NotFoundError("Offer");
+  return offer;
+};
+
+export const getAllOffersService = async (hotelId, options = {}) => {
+  assertScope(hotelId);
+
+  const filter = { hotelId };
+  if (options.type) filter.type = options.type;
+  if (options.activeOnly) {
+    const now = new Date();
+    filter.disable = false;
+    filter.$and = [
+      { $or: [{ startDate: null }, { startDate: { $lte: now } }] },
+      { $or: [{ endDate: null }, { endDate: { $gte: now } }] },
+    ];
+  }
+
+  return Offer.find(filter).populate("appliedOn").sort({ createdAt: -1 });
 };

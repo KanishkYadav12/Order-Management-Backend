@@ -5,17 +5,64 @@ import { Dish } from "../models/dishModel.js";
 import Table from "../models/tableModel.js";
 import Hotel from "../models/hotelModel.js";
 import { ServerError } from "../utils/errorHandler.js";
+import env from "../config/env.js";
+import logger from "../utils/logger.js";
 
+/**
+ * The Ably root key is server-side only.
+ *
+ * It previously also appeared as a literal in the browser bundle
+ * (UI/hooks/ably/useAbly.js), which handed every visitor publish and subscribe
+ * rights on every hotel's channel. Clients now call
+ * `POST /api/v1/realtime/token` and receive a short-lived token scoped to the
+ * one channel they are entitled to.
+ */
+let restClient = null;
 
 const initializeAblyRest = () => {
+  if (restClient) return restClient;
   try {
-    return new Ably.Rest({
-      key: process.env.ABLY_API_KEY
-    });
+    restClient = new Ably.Rest({ key: env.ABLY_API_KEY });
+    return restClient;
   } catch (error) {
-    console.error("Error initializing Ably REST:", error);
-    throw new ServerError("Failed to initialize REST service");
+    logger.error({ err: error }, "failed to initialise Ably");
+    throw new ServerError("Realtime service is unavailable");
   }
+};
+
+/** Channel carrying a hotel's kitchen/floor events. */
+export const hotelChannelName = (hotelId) => `hotel-${hotelId.toString()}`;
+
+/** Channel carrying a single table's customer-facing events. */
+export const tableChannelName = (tableId) => `table-${tableId.toString()}`;
+
+/**
+ * Issues a signed Ably token request for a staff member.
+ *
+ * Staff subscribe only — orders are published by the server, so no client
+ * needs publish rights. That alone removes the ability to inject fake orders
+ * onto a kitchen board.
+ */
+export const createStaffTokenRequest = async (hotelId, userId) => {
+  const channel = hotelChannelName(hotelId);
+  return initializeAblyRest().auth.createTokenRequest({
+    clientId: `staff-${userId.toString()}`,
+    capability: { [channel]: ["subscribe", "presence"] },
+    ttl: 60 * 60 * 1000, // 1 hour
+  });
+};
+
+/**
+ * Issues a signed Ably token request for a QR customer, scoped to their table
+ * alone — they can neither see nor touch any other table's stream.
+ */
+export const createCustomerTokenRequest = async (tableId, customerRef) => {
+  const channel = tableChannelName(tableId);
+  return initializeAblyRest().auth.createTokenRequest({
+    clientId: `customer-${customerRef}`,
+    capability: { [channel]: ["subscribe"] },
+    ttl: 4 * 60 * 60 * 1000, // 4 hours — one dining session
+  });
 };
 
 export const orderPublishService = async (order) => {

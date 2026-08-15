@@ -1,5 +1,18 @@
 /node_modules
 /models/not_in_use
+
+# Secrets — .env.example is the tracked template.
 .env
+.env.*
+!.env.example
+
 text.txt
 .codegpt
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db

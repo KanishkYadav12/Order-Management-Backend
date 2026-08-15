@@ -1,78 +1,47 @@
-import express from "express";
-import cookieParser from "cookie-parser";
-import dotenv from "dotenv";
-import cors from "cors";
+import mongoose from "mongoose";
+import env from "../config/env.js";
+import logger from "../utils/logger.js";
 import connectDb from "../connectDb.js";
-import connectAbly from "../services/ablyService.js";
-import { error } from "../middlewares/errorMiddleware.js";
-import userRouter from "../routes/userRouter.js";
-import devKeyRouter from "../routes/devKeyRouter.js";
-import hotelRouter from "../routes/hotelRouter.js";
-import authRouter from "../routes/authRouter.js";
-import tableRouter from "../routes/tableRouter.js";
-import qrRouter from "../routes/qrRouter.js";
-import ingredientRouter from "../routes/ingredientRouter.js";
-import categoryRouter from "../routes/categoryRouter.js";
-import dishRouter from "../routes/dishRouter.js";
-import orderRouter from "../routes/orderRouter.js";
-import billRouter from "../routes/billRouter.js";
-import offerRouter from "../routes/offerRouter.js";
-import imageUploadService from "../services/imageUploadService.js";
-import utilsRouter from "../routes/utilsRouter.js";
-import customerRouter from "../routes/customerRouter.js";
-import dashboardRouter from "../routes/dashboardRouter.js";
+import { createApp } from "./app.js";
 
-const app = express();
-dotenv.config();
+const app = createApp();
 
-const corsOptions = {
-  origin: [
-    "https://oms-rust.vercel.app", // ⭐ your admin frontend
-    "https://oms-pz2iyzcqu-kanishk-yadavs-projects.vercel.app", // ✅ Add this
-    "http://localhost:3000",
-    "http://localhost:3001",
-  ],
-  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: true,
+const start = async () => {
+  await connectDb(env.DATABASE_URL);
+
+  const server = app.listen(env.PORT, () => {
+    logger.info(
+      { port: env.PORT, env: env.NODE_ENV, ai: env.aiEnabled },
+      `API listening on port ${env.PORT}`
+    );
+  });
+
+  /** Drains in-flight requests before exiting so a deploy doesn't sever them. */
+  const shutdown = (signal) => {
+    logger.info({ signal }, "shutting down");
+    server.close(async () => {
+      await mongoose.connection.close(false);
+      process.exit(0);
+    });
+    // Hard stop if a connection refuses to drain.
+    setTimeout(() => process.exit(1), 10_000).unref();
+  };
+
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+
+  process.on("unhandledRejection", (reason) => {
+    logger.error({ err: reason }, "unhandled promise rejection");
+  });
+  process.on("uncaughtException", (err) => {
+    logger.fatal({ err }, "uncaught exception — exiting");
+    process.exit(1);
+  });
 };
 
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
-
-// Middleware setup
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
-app.use(cookieParser());
-
-await connectDb(process.env.DATABASE_URL);
-
-// Routes setup
-app.get("/", (req, res) => {
-  res.json({ message: "Welcome to the Hotel Order Management System" });
+start().catch((err) => {
+  logger.fatal({ err }, "failed to start");
+  process.exit(1);
 });
 
-app.use("/api/v1/dashboard", dashboardRouter);
-app.use("/api/v1/customers", customerRouter);
-app.use("/api/v1/uploads", utilsRouter);
-app.use("/api/v1/auth", authRouter);
-app.use("/api/v1/devkeys", devKeyRouter);
-app.use("/api/v1/users", userRouter);
-app.use("/api/v1/hotels", hotelRouter);
-app.use("/api/v1/tables", tableRouter);
-app.use("/api/v1/qrs", qrRouter);
-app.use("/api/v1/ingredients", ingredientRouter);
-app.use("/api/v1/categories", categoryRouter);
-app.use("/api/v1/dishes/", dishRouter);
-app.use("/api/v1/orders", orderRouter);
-app.use("/api/v1/bills", billRouter);
-app.use("/api/v1/offers", offerRouter);
-
-app.use(error);
-
-// Start server after services are initialized
-const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}...`);
-});
+export default app;

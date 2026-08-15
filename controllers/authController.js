@@ -1,203 +1,286 @@
+import crypto from "crypto";
 import { catchAsyncError } from "../middlewares/catchAsyncError.js";
-import { HotelOwner, SuperAdmin, User } from "../models/userModel.js";
+import {
+  SuperAdmin,
+  HotelOwner,
+  findUserByEmail,
+} from "../models/userModel.js";
 import {
   createUserWithRole,
   authenticateUser,
+  rotateRefreshSession,
+  revokeSession,
+  issueSession,
 } from "../services/authServices.js";
-import sendEmail from "../utils/sendEmail.js";
-import crypto from "crypto";
+import {
+  verifyRefreshToken,
+  refreshCookieName,
+  refreshCookieOptions,
+} from "../utils/generateToken.js";
+import { sendOtpEmail, sendPasswordResetEmail } from "../utils/sendEmail.js";
+import { ClientError, AuthError } from "../utils/errorHandler.js";
+import env from "../config/env.js";
+import logger from "../utils/logger.js";
+
+/** Maximum OTP guesses before the code is burned and must be re-requested. */
+const MAX_OTP_ATTEMPTS = 5;
+
+/**
+ * Public shape of a user. Keys match what the dashboard already reads, so the
+ * existing client keeps working unchanged.
+ */
+const publicUser = (user, accessToken) => ({
+  id: user._id,
+  name: user.name,
+  role: user.role,
+  email: user.email,
+  hotelId: user.hotelId ?? null,
+  isVerified: user.isVerified,
+  isApproved: user.isApproved,
+  ...(accessToken ? { token: accessToken, accessToken } : {}),
+});
+
+/**
+ * Account-recovery endpoints always answer the same way whether or not the
+ * address is registered. Anything else is a user-enumeration oracle.
+ */
+const NEUTRAL_RECOVERY_RESPONSE = {
+  status: "success",
+  message:
+    "If an account exists for that address, we've sent it an email. Check your inbox.",
+};
 
 export const signUp = catchAsyncError(async (req, res, next, session) => {
-  const { email, password, role, devKey, name } = req.body;
-
-  const { newUser, token } = await createUserWithRole(
-    { email, password, role, devKey, name },
-    session
-  );
-
-  res.cookie("authToken", token, {
-    httpOnly: false,
-    sameSite: "None",
-    secure: process.env.NODE_ENV === "production",
-    maxAge: 10 * 24 * 60 * 60 * 1000, // 10 days
-  });
+  const { newUser } = await createUserWithRole(req.body, session);
 
   res.status(201).json({
     status: "success",
-    message: "User created successfully",
-    data: newUser,
-    // data: {user: newUser}
+    message:
+      "Account created. Check your email for the 6-digit code to confirm your address.",
+    data: publicUser(newUser),
   });
 }, true);
 
-// controllers/authController.js
 export const login = catchAsyncError(async (req, res) => {
-  const { email, password, role } = req.body;
+  const { email, password } = req.body;
 
-  const { user, token } = await authenticateUser({ email, password, role });
+  const { user, accessToken, refreshToken } = await authenticateUser({
+    email,
+    password,
+    userAgent: req.headers["user-agent"],
+  });
 
-  // DO NOT set cookie for Authorization header flow.
-  // If you previously set cookies, remove that code.
+  // Long-lived credential goes in an httpOnly cookie the page cannot read;
+  // only the short-lived access token is handed to JavaScript.
+  res.cookie(refreshCookieName, refreshToken, refreshCookieOptions());
 
   res.status(200).json({
     status: "success",
-    message: "Login successful",
-    data: {
-      id: user._id,
-      name: user.name,
-      role: user.role,
-      email: user.email,
-      token, // client will store and send as Authorization: Bearer <token>
-    },
+    message: "Signed in",
+    data: publicUser(user, accessToken),
+  });
+});
+
+/** Exchanges the refresh cookie for a fresh access token, rotating the cookie. */
+export const refresh = catchAsyncError(async (req, res) => {
+  const token = req.cookies?.[refreshCookieName];
+  if (!token) throw new AuthError("Please sign in again.");
+
+  let payload;
+  try {
+    payload = verifyRefreshToken(token);
+  } catch {
+    res.clearCookie(refreshCookieName, refreshCookieOptions());
+    throw new AuthError("Your session has expired. Please sign in again.");
+  }
+
+  const { user, accessToken, refreshToken } = await rotateRefreshSession(
+    payload,
+    req.headers["user-agent"]
+  );
+
+  res.cookie(refreshCookieName, refreshToken, refreshCookieOptions());
+
+  res.status(200).json({
+    status: "success",
+    message: "Session refreshed",
+    data: publicUser(user, accessToken),
+  });
+});
+
+export const logout = catchAsyncError(async (req, res) => {
+  const token = req.cookies?.[refreshCookieName];
+
+  if (token) {
+    try {
+      await revokeSession(verifyRefreshToken(token), {
+        allDevices: Boolean(req.body?.allDevices),
+      });
+    } catch (err) {
+      // An unparseable token is already useless — clearing the cookie is
+      // still the right outcome, so this is not surfaced.
+      logger.debug({ err }, "logout with invalid refresh token");
+    }
+  }
+
+  res.clearCookie(refreshCookieName, refreshCookieOptions());
+  res.status(200).json({ status: "success", message: "Signed out" });
+});
+
+export const verifyEmail = catchAsyncError(async (req, res) => {
+  const { email, otp } = req.body;
+
+  const user = await findUserByEmail(email);
+  if (!user) {
+    throw new ClientError("That code is not valid.", 400, "INVALID_OTP");
+  }
+
+  if (user.isVerified) {
+    return res.status(200).json({
+      status: "success",
+      message: "Your email is already confirmed. You can sign in.",
+    });
+  }
+
+  if ((user.otpDetails?.attempts ?? 0) >= MAX_OTP_ATTEMPTS) {
+    user.clearOtp();
+    await user.save({ validateBeforeSave: false });
+    throw new ClientError(
+      "Too many incorrect attempts. Request a new code.",
+      429,
+      "OTP_ATTEMPTS_EXCEEDED"
+    );
+  }
+
+  if (!user.verifyOtp(otp)) {
+    user.otpDetails.attempts = (user.otpDetails?.attempts ?? 0) + 1;
+    await user.save({ validateBeforeSave: false });
+    throw new ClientError(
+      "That code is incorrect or has expired.",
+      400,
+      "INVALID_OTP"
+    );
+  }
+
+  user.isVerified = true;
+  user.clearOtp();
+  await user.save({ validateBeforeSave: false });
+
+  res.status(200).json({
+    status: "success",
+    message: "Email confirmed. You can sign in now.",
   });
 });
 
 export const resendOtp = catchAsyncError(async (req, res) => {
   const { email } = req.body;
-  console.log("resend-otp-called : ", email);
-  // Find the user by email
-  let user = await SuperAdmin.findOne({ email: email });
-  if (!user) user = await HotelOwner.findOne({ email: email });
-  if (!user) {
-    return res.status(404).json({ message: "User not found." });
+  const user = await findUserByEmail(email);
+
+  // Neutral response regardless of whether the account exists or is already
+  // verified — the same reasoning as password reset.
+  if (user && !user.isVerified) {
+    const code = user.issueOtp();
+    await user.save({ validateBeforeSave: false });
+    await sendOtpEmail(user.email, code, user.name);
   }
-
-  // Check if the user is already verified
-  if (user.isVerified) {
-    return res.status(400).json({ message: "User is already verified." });
-  }
-
-  // Generate a new OTP
-  const newOtp = Math.floor(100000 + Math.random() * 900000); // 6-digit OTP
-  const newExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes from now
-
-  // Update user's OTP details
-  user.otpDetails = {
-    value: newOtp,
-    expiry: newExpiry,
-  };
-  await user.save();
-
-  // Send the new OTP via email
-  const subject = "Resend OTP for Email Verification";
-  const description = `Your new OTP for email verification is ${newOtp}. It is valid for 10 minutes.`;
-  await sendEmail(email, subject, description);
 
   res.status(200).json({
     status: "success",
-    message: "OTP has been resent to your email.",
+    message:
+      "If that address needs confirming, we've sent a new code. Check your inbox.",
   });
 });
 
-export const logout = (req, res) => {
-  res.cookie("authToken", "", { maxAge: 1, sameSite: "None" });
-  res.status(200).json({ status: "success", message: "Logout successful" });
-};
-
-// Email Verification Controller
-export const verifyEmail = catchAsyncError(async (req, res) => {
-  const { email, otp } = req.body;
-
-  // Find user by email
-  console.log("email : ", email);
-  let user = await SuperAdmin.findOne({ email: email });
-  if (!user) user = await HotelOwner.findOne({ email: email });
-  if (!user) {
-    return res
-      .status(404)
-      .json({ status: "failed", message: "User not found." });
-  }
-
-  console.log(user);
-
-  // Check if OTP matches and is not expired
-  if (
-    user?.otpDetails?.value === Number(otp) &&
-    user?.otpDetails?.expiry > new Date()
-  ) {
-    // Mark user as verified
-    user.isVerified = true;
-    user.otpDetails = { value: null, expiry: null }; // Clear OTP details
-    await user.save();
-
-    return res.status(200).json({
-      status: "success",
-      message: "Email verified successfully from backend.",
-    });
-  } else {
-    return res
-      .status(400)
-      .json({ status: "success", message: "Invalid or expired OTP." });
-  }
-});
-
-//reset password link sender after recieving email as input if email exists in db
 export const forgotPassword = catchAsyncError(async (req, res) => {
   const { email } = req.body;
+  const user = await findUserByEmail(email);
 
-  // Find user by email
-  let user = await SuperAdmin.findOne({ email: email });
-  if (!user) user = await HotelOwner.findOne({ email: email });
-  if (!user) {
-    return res
-      .status(404)
-      .json({ status: "failed", message: "User not found." });
+  if (user) {
+    const resetToken = user.createPasswordResettoken();
+    await user.save({ validateBeforeSave: false });
+
+    // Built from configuration. This used to be a hardcoded URL pointing at a
+    // different deployment entirely, so reset links never reached this app.
+    const resetUrl = `${env.FRONTEND_URL.replace(/\/$/, "")}/reset-password/${resetToken}`;
+    await sendPasswordResetEmail(user.email, resetUrl, user.name);
   }
 
-  // Generate a password reset token with jwt
-  const resettoken = user.createPasswordResettoken();
-  await user.save({ validateBeforeSave: false });
-
-  // const frontendURL = process.env.FRONTEND_URL;
-
-  const frontendURL = "https://orm-frontend-eight.vercel.app";
-  const resetURL = `${frontendURL}/reset-password/${resettoken}`;
-
-  const subject = "Password Reset Link";
-  const description = `Click on the link below to reset your password. The link will expire in 10 minutes.\n\n${resetURL}`;
-  await sendEmail(email, subject, description);
-
-  res.status(200).json({
-    status: "success",
-    message: "Password reset link has been sent to your email.",
-  });
+  res.status(200).json(NEUTRAL_RECOVERY_RESPONSE);
 });
 
-//reset password after recieving token and new password as input
 export const resetPassword = catchAsyncError(async (req, res) => {
-  const { token } = req.params; // Plain token from the URL
+  const { token } = req.params;
   const { password } = req.body;
 
-  // Hash the incoming token to match the stored hashed token
-  const hashedtoken = crypto.createHash("sha256").update(token).digest("hex");
+  const hashed = crypto.createHash("sha256").update(token).digest("hex");
+  const query = {
+    passwordResettoken: hashed,
+    passwordResetExpires: { $gt: new Date() },
+  };
 
-  // Find user by hashed token and ensure the token is not expired
-  let user = await SuperAdmin.findOne({
-    passwordResettoken: hashedtoken,
-    passwordResetExpires: { $gt: Date.now() }, // Ensure token is still valid
-  });
-
-  if (!user) {
-    user = await HotelOwner.findOne({
-      passwordResettoken: hashedtoken,
-      passwordResetExpires: { $gt: Date.now() },
-    });
-  }
+  const user =
+    (await SuperAdmin.findOne(query)) ?? (await HotelOwner.findOne(query));
 
   if (!user) {
-    return res
-      .status(400)
-      .json({ status: "failed", message: "Invalid or expired token." });
+    throw new ClientError(
+      "That reset link has expired. Request a new one.",
+      400,
+      "RESET_TOKEN_INVALID"
+    );
   }
 
-  // Update user's password
-  user.password = password; // Assuming you have pre-save middleware to hash passwords
-  user.passwordResettoken = undefined; // Clear the reset token
-  user.passwordResetExpires = undefined; // Clear the expiration time
+  user.password = password;
+  user.clearPasswordReset();
+  // The pre-save hook bumps tokensValidFrom and drops refresh sessions, so
+  // every device is signed out when the password changes.
   await user.save();
 
   res.status(200).json({
     status: "success",
-    message: "Password reset successful.",
+    message: "Password updated. You can sign in with your new password.",
+  });
+});
+
+export const changePassword = catchAsyncError(async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+
+  const Model = req.user.role === "superadmin" ? SuperAdmin : HotelOwner;
+  const user = await Model.findById(req.user._id).select("+password");
+  if (!user) throw new AuthError("Please sign in again.");
+
+  if (!(await user.matchPassword(currentPassword))) {
+    throw new ClientError(
+      "Your current password is incorrect.",
+      400,
+      "INCORRECT_PASSWORD"
+    );
+  }
+
+  user.password = newPassword;
+  await user.save();
+
+  // Every session is now invalid, including this one — issue a new pair so
+  // the user is not bounced to the login screen after changing a password.
+  const { accessToken, refreshToken } = await issueSession(
+    user,
+    req.headers["user-agent"]
+  );
+  await user.save({ validateBeforeSave: false });
+
+  res.cookie(refreshCookieName, refreshToken, refreshCookieOptions());
+
+  res.status(200).json({
+    status: "success",
+    message: "Password updated.",
+    data: publicUser(user, accessToken),
+  });
+});
+
+/** Returns the signed-in user — used by the dashboard to rehydrate on load. */
+export const me = catchAsyncError(async (req, res) => {
+  res.status(200).json({
+    status: "success",
+    message: "Profile loaded",
+    data: { user: req.user },
   });
 });

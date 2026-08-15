@@ -1,94 +1,66 @@
 import { catchAsyncError } from "../middlewares/catchAsyncError.js";
-import { ClientError } from "../utils/errorHandler.js";
-import Offer from "../models/offerModel.js"
-import { createOfferService, deleteOfferService, updateOfferService } from "../services/offerServices.js";
+import {
+  createOfferService,
+  updateOfferService,
+  deleteOfferService,
+  getOfferByIdService,
+  getAllOffersService,
+} from "../services/offerServices.js";
 
-export const getOfferDetails = catchAsyncError(async (req, res, next) => {
-    const { id } = req.params;
-    if (!id) {
-        throw new ClientError("Please provide offer id to get offer details");
-    }
+export const getAllOffers = catchAsyncError(async (req, res) => {
+  const offers = await getAllOffersService(req.hotelId, {
+    type: req.query.type,
+    activeOnly: req.query.activeOnly === "true",
+  });
 
-    const offer = await Offer.findById(id).populate("appliedOn");
+  res.status(200).json({
+    status: "success",
+    message: "Offers loaded",
+    data: { offers },
+  });
+});
 
-    res.status(201).json({
-        status: "success",
-        message: "Offer details fetched successfully",
-        data: { offer },
-    });
-})
+export const getOfferDetails = catchAsyncError(async (req, res) => {
+  const offer = await getOfferByIdService(req.params.id, req.hotelId);
 
-export const getAllOffers = catchAsyncError(async (req, res, next) => {
-    const offers = await Offer.find({ hotelId: req.user.hotelId }).populate("appliedOn");
-
-    res.status(201).json({
-        status: "success",
-        message: "All Offers fetched successfully",
-        data: { offers }
-    })
-})
+  res.status(200).json({
+    status: "success",
+    message: "Offer loaded",
+    data: { offer },
+  });
+});
 
 export const createOffer = catchAsyncError(async (req, res, next, session) => {
-    const { hotelId } = req.user
-    const { name, value, type, description, discountType, appliedOn, startDate , endDate } = req.body;
+  const offer = await createOfferService(req.hotelId, req.body, session);
 
-    if (!hotelId || !name || !value || !type || !discountType ||
-        (type == "specific" && (!appliedOn || appliedOn.length == 0))) {
-        throw new ClientError("Please provide required details to create offer");
-    }
-    const offer = await createOfferService({ ...req.body, hotelId }, session);
-    res.status(201).json({
-        status: "success",
-        message: "Offer created successfully",
-        data: { offer }
-    })
-}, true)
+  res.status(201).json({
+    status: "success",
+    message: "Offer created",
+    data: { offer },
+  });
+}, true);
 
 export const updateOffer = catchAsyncError(async (req, res, next, session) => {
-    const { id } = req.params;
+  const offer = await updateOfferService(
+    req.params.id,
+    req.hotelId,
+    req.body,
+    session
+  );
 
-    if (!id) {
-        throw new ClientError("Please provide offer id to update offer!");
-    }
-
-    const { name, value, type, discountType, appliedOn, startDate, endDate , appliedAbove, description} = req.body;
-    if (
-        !name &&
-        !value &&
-        !discountType &&
-        !startDate &&
-        !endDate &&
-        !type &&
-        !appliedOn &&
-        !appliedAbove
-    ) {
-        throw new ClientError("Please provide at least one field to update the offer!");
-    }
-
-    if (type === "specific" && (!appliedOn || appliedOn.length === 0)) {
-        throw new ClientError("Please provide dishes for a specific type offer!");
-    }
-
-    const offer = await updateOfferService(id, { ...req.body }, session)
-
-    res.status(201).json({
-        status: "success",
-        message: "Offer updated successfully",
-        data: { offer }
-    })
-}, true)
+  res.status(200).json({
+    status: "success",
+    message: "Offer updated",
+    data: { offer },
+  });
+}, true);
 
 export const deleteOffer = catchAsyncError(async (req, res, next, session) => {
-    const { id } = req.params
-    if (!id) {
-        throw new ClientError("Please provide offer id to delete offer!");
-    }
-    const offer = await deleteOfferService(id, session)
+  const offer = await deleteOfferService(req.params.id, req.hotelId, session);
 
-    res.status(201).json({
-        status: "success",
-        message: "Offer deleted successfully",
-        data: { offer }
-    })
-}, true)
-
+  res.status(200).json({
+    status: "success",
+    message: "Offer removed",
+    data: { offer },
+  });
+}, true);

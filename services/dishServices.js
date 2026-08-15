@@ -1,157 +1,167 @@
 import { Dish } from "../models/dishModel.js";
 import Offer from "../models/offerModel.js";
+import {
+  ClientError,
+  NotFoundError,
+  ValidationError,
+} from "../utils/errorHandler.js";
 
-import { ClientError, ServerError } from "../utils/errorHandler.js";
+/**
+ * Every function here takes `hotelId` and folds it into the query.
+ *
+ * Previously these looked up by `_id` alone, so any authenticated owner could
+ * read, edit or delete another restaurant's menu simply by knowing an id.
+ * Scoping in the query — rather than checking after the fetch — means a
+ * mismatched tenant is indistinguishable from a missing record.
+ */
 
-export const createDishService = async (dishData) => {
-    try {
-        const hotelId = dishData.hotelId;
-        if (!hotelId) {
-            throw new ClientError("Hotel ID is required");
-        }
-        console.log('dish-data-1', dishData)
-        if (!dishData.name || !dishData.price) {
-            throw new ClientError("Dish name and price are required!");
-        }
-        if(!dishData.category || dishData.category == null || dishData.category == "" ){
-            throw new ClientError("Category is required to create dish!");
-        }
-        console.log('dish-data-2', dishData, typeof dishData.price)
+const assertScope = (hotelId) => {
+  if (!hotelId) {
+    throw new ClientError(
+      "Your account is not linked to a restaurant yet.",
+      409,
+      "NO_HOTEL_LINKED"
+    );
+  }
+};
 
-        const dish = await Dish.create({ ...dishData, hotelId });
+const POPULATE = "ingredients category offer";
 
-        return dish;
-    } catch (error) {
-        console.log("error while creating dish", error);
-        throw error;
-    }
-}
+export const createDishService = async (hotelId, dishData) => {
+  assertScope(hotelId);
 
-export const getDishByIdService = async (dishId) => {
-    try {
-        const dish = await Dish.findById(dishId).populate("ingredients category offer");
-        if (!dish) {
-            throw new ClientError('Dish not found');
-        }
-        return dish;
-    }
-    catch (error) {
-        console.log("fetch-all-dish", error)
-        if (error instanceof ClientError) {
-            throw new error;
-        } else {
-            throw new ServerError('Failed to fetch dish');
-        }
-    }
-}
+  if (!dishData.name || dishData.price === undefined) {
+    throw new ValidationError("A dish needs a name and a price.");
+  }
+  if (!dishData.category) {
+    throw new ValidationError("Choose a category for this dish.");
+  }
 
-export const getAllDishesService = async (hotelId) => {
-    try {
-        // const dishes = await Dish.find({ hotelId }).populate("ingredients category offer");
+  const dish = await Dish.create({ ...dishData, hotelId });
+  return dish.populate(POPULATE);
+};
 
-        const dishes = await Dish.find({ hotelId, isDeleted: false }).populate("ingredients category offer");
+export const getDishByIdService = async (dishId, hotelId) => {
+  assertScope(hotelId);
 
-        // if (!dishes || dishes.length === 0) {
-        //     throw new ClientError("No dishes available!", "Not found");
-        // }
+  const dish = await Dish.findOne({
+    _id: dishId,
+    hotelId,
+    isDeleted: false,
+  }).populate(POPULATE);
 
-        return dishes;
-    } catch (error) {
-        if(error instanceof ClientError){
-            throw error;
-        }
-        throw new ServerError('Failed to fetch dishes');
-    }
-}
+  if (!dish) throw new NotFoundError("Dish");
+  return dish;
+};
 
-export const updateDishService = async (dishId, dishData) => {
-    try {
-        console.log("dish data : ", dishData)
-        if(!dishData.category || dishData.category == null || dishData.category == "" ){
-            throw new ServerError("Category is required to create dish!");
-        }
-        const dish = await Dish.findByIdAndUpdate(dishId, dishData, { new: true, runValidators: true }).populate("ingredients category offer");
+/**
+ * @param {object} [options]
+ * @param {boolean} [options.includeDeleted] Include soft-deleted dishes.
+ * @param {string}  [options.search]         Case-insensitive name match.
+ * @param {string}  [options.category]       Restrict to one category.
+ */
+export const getAllDishesService = async (hotelId, options = {}) => {
+  assertScope(hotelId);
 
-        if (!dish) {
-            throw new ClientError('Dish not found');
-        }
-        return dish;
-    }
-    catch (error) {
-        console.log("update dish err : ", error)
-        throw new ServerError(error.message || 'Failed to update dish');
-    }
+  const filter = { hotelId };
+  if (!options.includeDeleted) filter.isDeleted = false;
+  if (options.category) filter.category = options.category;
+  if (options.search) {
+    // Escaped so a user-supplied string can't act as a regex.
+    const escaped = options.search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    filter.name = { $regex: escaped, $options: "i" };
+  }
 
-}
+  return Dish.find(filter).populate(POPULATE).sort({ name: 1 });
+};
 
-export const deleteDishService = async (dishId) => {
-    try {
-        //find the dish by id and set isDeleted to true
-        const dish = await Dish.findByIdAndUpdate(dishId, { isDeleted: true }, { new: true });
-        if (!dish) {
-            throw new ClientError('Dish not found');
-        }
-        return dish;
-    } catch (error) {
-        if (error instanceof ClientError) {
-            throw new ClientError(error.message);
-        } else {
-            throw new ServerError('Failed to delete dish');
-        }
-    }
-}
+export const updateDishService = async (dishId, hotelId, dishData) => {
+  assertScope(hotelId);
 
+  // hotelId can never be reassigned through an update — that would move a
+  // dish between tenants.
+  const { hotelId: _ignored, _id: _ignoredId, ...safeData } = dishData;
+
+  if ("category" in safeData && !safeData.category) {
+    throw new ValidationError("Choose a category for this dish.");
+  }
+
+  const dish = await Dish.findOneAndUpdate({ _id: dishId, hotelId }, safeData, {
+    new: true,
+    runValidators: true,
+  }).populate(POPULATE);
+
+  if (!dish) throw new NotFoundError("Dish");
+  return dish;
+};
+
+/** Soft delete — history and past bills still reference the dish. */
+export const deleteDishService = async (dishId, hotelId) => {
+  assertScope(hotelId);
+
+  const dish = await Dish.findOneAndUpdate(
+    { _id: dishId, hotelId },
+    { isDeleted: true, deletedAt: new Date() },
+    { new: true }
+  );
+
+  if (!dish) throw new NotFoundError("Dish");
+  return dish;
+};
+
+/**
+ * Filters by `category`, the field the schema actually defines. This queried
+ * `categories` — plural, and nonexistent — so it always matched nothing and
+ * then threw, meaning browse-by-category never worked.
+ */
 export const getDishesByCategoryService = async (hotelId, categoryId) => {
-    try {
-        const dishes = await Dish.find({
-            hotelId,
-            categories: categoryId,
-            isDeleted: false,
-        });
+  assertScope(hotelId);
 
-        if (!dishes || dishes.length === 0) {
-            throw new ClientError("NotFoundError", "No dishes found");
-        }
-
-        return dishes;
-    } catch (error) {
-        throw new ServerError('Failed to fetch dishes');
-    }
+  return Dish.find({
+    hotelId,
+    category: categoryId,
+    isDeleted: false,
+  })
+    .populate(POPULATE)
+    .sort({ name: 1 });
 };
 
-export const removeOfferFromDishService = async (dishId, session) => {
-    // Fetch the dish to get the offer
-    try {
-        const dish = await Dish.findById(dishId);
+export const removeOfferFromDishService = async (dishId, hotelId, session) => {
+  assertScope(hotelId);
 
-        if (!dish) {
-            throw new ClientError('Dish not found!');
-        }
+  const dish = await Dish.findOne({ _id: dishId, hotelId }).session(session);
+  if (!dish) throw new NotFoundError("Dish");
+  if (!dish.offer) {
+    throw new ClientError("There is no offer on this dish.", 400, "NO_OFFER");
+  }
 
-        if (!dish.offer) {
-            throw new ClientError('No offer is applied to this dish!');
-        }
+  const offerId = dish.offer;
 
-        const offerId = dish.offer;
+  const updatedDish = await Dish.findOneAndUpdate(
+    { _id: dishId, hotelId },
+    { $set: { offer: null } },
+    { new: true, session }
+  ).populate(POPULATE);
 
-        // Remove the offer from the dish
-        const updatedDish = await Dish.findByIdAndUpdate(
-            dishId,
-            { $unset: { offer: "" } },
-            { new: true }
-        );
+  await Offer.updateOne(
+    { _id: offerId, hotelId },
+    { $pull: { appliedOn: dishId } },
+    { session }
+  );
 
-        // Remove the dishId from the offer's appliedOn array
-        await Offer.findByIdAndUpdate(
-            offerId,
-            { $pull: { appliedOn: dishId } },
-
-        );
-
-        return updatedDish;
-    } catch (error) {
-        console.log("error- while removing offer", error)
-        throw error
-    }
+  return updatedDish;
 };
 
+/** Marks a dish in or out of stock without touching anything else. */
+export const setDishStockService = async (dishId, hotelId, outOfStock) => {
+  assertScope(hotelId);
+
+  const dish = await Dish.findOneAndUpdate(
+    { _id: dishId, hotelId },
+    { outOfStock: Boolean(outOfStock) },
+    { new: true }
+  ).populate(POPULATE);
+
+  if (!dish) throw new NotFoundError("Dish");
+  return dish;
+};

@@ -1,104 +1,160 @@
 import { catchAsyncError } from "../middlewares/catchAsyncError.js";
 import { Dish } from "../models/dishModel.js";
-import offerModel from "../models/offerModel.js";
-import orderModel from "../models/orderModel.js";
-import tableModel from "../models/tableModel.js";
+import Offer from "../models/offerModel.js";
+import Order from "../models/orderModel.js";
+import Table from "../models/tableModel.js";
+import Hotel from "../models/hotelModel.js";
 import { deleteOrderPublishService } from "../services/ablyService.js";
 import { getAllCategoriesService } from "../services/categoryServices.js";
 import { deleteOrderService } from "../services/orderServices.js";
-import { ClientError, ServerError } from "../utils/errorHandler.js";
+import { ORDER_STATUS } from "../utils/constant.js";
+import { ClientError, NotFoundError } from "../utils/errorHandler.js";
+import logger from "../utils/logger.js";
+
+/**
+ * The customer-facing menu API.
+ *
+ * These endpoints back the QR app, where the diner has no account. What they
+ * return is menu data a guest sitting in the restaurant can already see, so
+ * the browse routes stay open — but anything tied to a specific sitting now
+ * requires the table session issued at QR scan.
+ */
+
+const activeHotel = async (hotelId) => {
+  const hotel = await Hotel.findById(hotelId).select(
+    "name logo banner description billing serviceHours isActive"
+  );
+  if (!hotel || !hotel.isActive) throw new NotFoundError("Restaurant");
+  return hotel;
+};
 
 export const getHotelDishes = catchAsyncError(async (req, res) => {
-  const hotelId = req.params.hotelId;
+  const { hotelId } = req.params;
+  await activeHotel(hotelId);
+
   const dishes = await Dish.find({
-    hotelId: hotelId,
+    hotelId,
     isDeleted: false,
-  }).populate("ingredients category offer");
-  return res.send({
+  })
+    .populate("ingredients category offer")
+    // Cost and recipe are internal; a diner has no business seeing them.
+    .select("-recipe -taxRatePercent");
+
+  res.status(200).json({
     status: "success",
-    message: "Customer dishes fetched successfully",
-    data: { dishes: dishes },
+    message: "Menu loaded",
+    data: { dishes },
   });
 });
 
 export const getHotelCategories = catchAsyncError(async (req, res) => {
-  const hotelId = req.params.hotelId;
-  const categories = await getAllCategoriesService(hotelId);
-  return res.send({
-    status: "success",
-    message: "Customer categories fetched successfully",
-    data: { categories: categories },
-  });
-});
+  const { hotelId } = req.params;
+  await activeHotel(hotelId);
 
-export const getHotelTable = catchAsyncError(async (req, res) => {
-  const tableId = req.params.tableId;
-  const table = await tableModel.findById(tableId).populate("customer");
-  if (!table) throw new ServerError("table not found");
-  return res.send({
+  const categories = await getAllCategoriesService(hotelId);
+
+  res.status(200).json({
     status: "success",
-    message: "Customer Table fetched successfully",
-    data: { table: table },
+    message: "Categories loaded",
+    data: { categories },
   });
 });
 
 export const getHotelOffers = catchAsyncError(async (req, res) => {
-  const hotelId = req.params.hotelId;
-  const offers = await offerModel
-    .find({ hotelId: hotelId })
-    .populate("appliedOn");
+  const { hotelId } = req.params;
+  await activeHotel(hotelId);
 
-  res.status(201).json({
+  const now = new Date();
+  const offers = await Offer.find({
+    hotelId,
+    disable: false,
+    $and: [
+      { $or: [{ startDate: null }, { startDate: { $lte: now } }] },
+      { $or: [{ endDate: null }, { endDate: { $gte: now } }] },
+    ],
+  }).populate("appliedOn", "_id name price");
+
+  res.status(200).json({
     status: "success",
-    message: "All customer Offers fetched successfully",
+    message: "Offers loaded",
     data: { offers },
   });
 });
 
-export const getTableOrders = catchAsyncError(async (req, res) => {
-  const tableId = req.params.tableId;
-  const {customerId} = req.query;
-  if(!tableId) throw new ClientError("Required", "table id is required to get table orders");
-  const table = await tableModel.findById(tableId);
-  if(!table) throw new ClientError("NotFound", "table id is invalid");
-  
-  let orders = await orderModel
-    .find({ tableId: tableId })
-    .populate("customerId", "_id name")
-    .populate("dishes.dishId")
-    .populate("tableId", "_id sequence")
-    .populate("hotelId", "_id name");
-  if (!orders || !customerId || !table.customer || table.customer.toString() != customerId ){
-    orders = [];
-  }
+/** Table details for the QR header. Requires a session for that table. */
+export const getHotelTable = catchAsyncError(async (req, res) => {
+  const { tableId } = req.params;
 
-  res.status(201).json({
+  const table = await Table.findOne({ _id: tableId, isDeleted: false })
+    .select("_id sequence capacity status hotelId")
+    .populate("hotelId", "name logo");
+
+  if (!table) throw new NotFoundError("Table");
+
+  res.status(200).json({
     status: "success",
-    message: "All customer Orders fetched successfully",
-    data: { orders },
+    message: "Table loaded",
+    data: { table },
   });
-
-  return orders;
 });
 
+/**
+ * The diner's own orders for this sitting.
+ *
+ * Scoped by the signed table session rather than by a `customerId` supplied
+ * in the query string, which the caller could simply change.
+ */
+export const getTableOrders = catchAsyncError(async (req, res) => {
+  const { tableId } = req.params;
+  const { customerId } = req.customerSession;
+
+  const orders = customerId
+    ? await Order.find({ tableId, customerId })
+        .populate("customerId", "_id name")
+        .populate("dishes.dishId")
+        .populate("tableId", "_id sequence")
+        .populate("hotelId", "_id name")
+        .sort({ createdAt: 1 })
+    : [];
+
+  res.status(200).json({
+    status: "success",
+    message: "Orders loaded",
+    data: { orders },
+  });
+});
+
+/** A diner may cancel their own order only while it is still a draft. */
 export const deleteDraftOrders = catchAsyncError(
   async (req, res, next, session) => {
     const { orderId } = req.params;
-    if (!orderId) {
-      throw new ClientError("Please provide sufficient data to delete order");
-    }
-    const order = await orderModel.findById(orderId);
-    if (!order) throw new ServerError("Order not found!");
-    if (order.status != "draft")
-      throw new ServerError(
-        "you can not delete this order, please contact to staff"
-      );
-    const data = await deleteOrderService(orderId, session);
-    await deleteOrderPublishService(order);
 
-    res.status(201).json({
+    const order = await Order.findById(orderId).session(session);
+    if (!order) throw new NotFoundError("Order");
+
+    if (order.tableId.toString() !== req.customerSession.tableId) {
+      throw new NotFoundError("Order");
+    }
+
+    if (order.status !== ORDER_STATUS.DRAFT) {
+      throw new ClientError(
+        "This order is already with the kitchen. Please ask a member of staff.",
+        409,
+        "ORDER_NOT_DRAFT"
+      );
+    }
+
+    const data = await deleteOrderService(orderId, order.hotelId, session);
+
+    try {
+      await deleteOrderPublishService(order);
+    } catch (err) {
+      logger.error({ err, orderId }, "order deleted but realtime publish failed");
+    }
+
+    res.status(200).json({
       status: "success",
-      message: "Order deleted successfully",
+      message: "Order removed",
       data,
     });
   },

@@ -1,18 +1,33 @@
+import nodemailer from "nodemailer";
+import env from "./env.js";
+import logger from "../utils/logger.js";
 
-import dotenv from 'dotenv'
+/**
+ * SMTP transport.
+ *
+ * `port` was previously spelled `PORT`, which nodemailer ignores — the
+ * connection fell back to the `service: "gmail"` defaults and the configured
+ * port was never used. Both are set correctly here, and `secure` is derived
+ * from the port rather than hardcoded to false.
+ */
+const transporter = nodemailer.createTransport({
+  host: env.EMAIL_HOST,
+  port: env.EMAIL_PORT,
+  secure: env.EMAIL_PORT === 465, // 465 is implicit TLS; 587 upgrades via STARTTLS
+  auth: {
+    user: env.EMAIL_USER,
+    pass: env.EMAIL_PASS,
+  },
+  pool: true,
+  maxConnections: 3,
+  maxMessages: 50,
+});
 
-dotenv.config();
-import nodemailer from 'nodemailer'
-
-let transporter = nodemailer.createTransport({
-    service : 'gmail',
-    host : process.env.EMAIL_HOST,
-    PORT : process.env.EMAIL_PORT,
-    secure : false,
-    auth : {
-        user : process.env.EMAIL_USER,
-        pass : process.env.EMAIL_PASS
-    }
-})
+// Verify once at boot so a bad SMTP config surfaces in the logs immediately
+// rather than on the first user who tries to register.
+transporter
+  .verify()
+  .then(() => logger.info("SMTP transport ready"))
+  .catch((err) => logger.error({ err }, "SMTP transport unavailable"));
 
 export default transporter;

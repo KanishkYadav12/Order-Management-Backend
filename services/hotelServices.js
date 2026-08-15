@@ -1,119 +1,107 @@
-// services/hotelService.js
-import Hotel from '../models/hotelModel.js'; // Make sure the model is correct
-import { ROLES } from '../utils/constant.js';
-import { ClientError, ServerError } from '../utils/errorHandler.js';
+import Hotel from "../models/hotelModel.js";
+import { HotelOwner } from "../models/userModel.js";
+import { ROLES } from "../utils/constant.js";
+import { NotFoundError, ForbiddenError } from "../utils/errorHandler.js";
+
+/**
+ * Fields a tenant may change on their own restaurant. Anything outside this
+ * list — ownerId above all — is unreachable from a request body.
+ */
+const OWNER_EDITABLE = [
+  "name",
+  "location",
+  "logo",
+  "banner",
+  "description",
+  "phone",
+  "email",
+];
+
+const BILLING_EDITABLE = [
+  "gstin",
+  "taxRatePercent",
+  "pricesIncludeTax",
+  "serviceChargePercent",
+  "currency",
+  "currencySymbol",
+  "roundOffEnabled",
+  "invoicePrefix",
+  "footerNote",
+];
 
 export const getHotelByIdService = async (user, hotelId) => {
-  try {
-    // If the user is a HotelOwner, fetch the hotel using their own hotelId
-    const hotelIdToUse = user.role === ROLES.HOTEL_OWNER ? user.hotelId : hotelId;
-    const hotel = await Hotel.findById(hotelIdToUse);
+  // A tenant always resolves to their own hotel regardless of what was asked
+  // for, so a guessed id in the URL cannot widen their access.
+  const targetId = user.role === ROLES.SUPER_ADMIN ? hotelId : user.hotelId;
 
-    // If no hotel is found, throw a client error
-    if (!hotel) {
-      throw new ClientError('Hotel not found', 404);
-    }
+  const hotel = await Hotel.findById(targetId).populate("ownerId", "name email phone");
+  if (!hotel) throw new NotFoundError("Restaurant");
 
-    // HotelOwner can only access their own hotel
-    if (user.role === ROLES.HOTEL_OWNER && hotel.ownerId.toString() !== user.id) {
-      throw new ClientError('Access denied. You can only view your own hotel.', 403);
-    }
-
-    return hotel;
-  } catch (error) {
-    if(error instanceof ClientError) {
-      throw error;
-    }
-    else {
-      throw new ServerError('Error while fetching hotel details');
-    }
-  }
+  return hotel;
 };
 
+export const updateHotelService = async (user, hotelId, updates) => {
+  const targetId = user.role === ROLES.SUPER_ADMIN ? hotelId : user.hotelId;
 
-export const updateHotelService = async (user, hotelId, updateData) => {
-  try {
-    // Fetch the hotel based on the user's role
-    const hotelIdToUse = user.role === ROLES.HOTEL_OWNER ? user.hotelId : hotelId;
-    const hotel = await Hotel.findById(hotelIdToUse);
+  const hotel = await Hotel.findById(targetId);
+  if (!hotel) throw new NotFoundError("Restaurant");
 
-    // If no hotel is found, throw a client error
-    if (!hotel) {
-      throw new ClientError('Hotel not found', 404);
-    }
-
-    // SuperAdmin can update any hotel, HotelOwner can only update their own hotel
-    if (user.role === ROLES.HOTEL_OWNER && hotel.ownerId.toString() !== user.id) {
-      throw new ClientError('Access denied. You can only update your own hotel.', 403);
-    }
-
-    // Update the hotel fields with the provided data
-    hotel.name = updateData.name || hotel.name;
-    hotel.location = updateData.location || hotel.location;
-    hotel.logo = updateData.logo || hotel.logo;
-    hotel.description = updateData.description || hotel.description;
-    hotel.phone = updateData.phone || hotel.phone;
-    hotel.description = updateData.description || hotel.description;
-    hotel.email = updateData.email || hotel.email;
-
-    // Save the updated hotel
-    await hotel.save();
-
-    return hotel;
-  } catch (error) {
-    if(error instanceof ClientError) {
-      throw error;
-    }
-    else throw new ServerError('Error while updating hotel details');
+  for (const field of OWNER_EDITABLE) {
+    if (updates[field] !== undefined) hotel[field] = updates[field];
   }
+
+  if (updates.billing) {
+    for (const field of BILLING_EDITABLE) {
+      if (updates.billing[field] !== undefined) {
+        hotel.billing[field] = updates.billing[field];
+      }
+    }
+  }
+
+  if (updates.serviceHours) {
+    Object.assign(hotel.serviceHours, updates.serviceHours);
+  }
+
+  await hotel.save();
+  return hotel;
 };
 
-
+/** Platform-level: removing a restaurant is never a tenant action. */
 export const deleteHotelService = async (user, hotelId) => {
-  try {
-    // Fetch the hotel based on the user's role
-    const hotelIdToUse = user.role === ROLES.HOTEL_OWNER ? user.hotelId : hotelId;
-    const hotel = await Hotel.findById(hotelIdToUse);
-
-    // If no hotel is found, throw a client error
-    if (!hotel) {
-      throw new ClientError('Hotel not found', 404);
-    }
-
-    // SuperAdmin can delete any hotel, HotelOwner can delete only their own hotel
-    if (user.role === ROLES.HOTEL_OWNER && hotel.ownerId.toString() !== user.id) {
-      throw new ClientError('Access denied. You can only delete your own hotel.', 403);
-    }
-
-    // Delete the hotel
-    await hotel.remove();
-
-  } catch (error) {
-    if(error instanceof ClientError) {
-      throw error;
-    }
-    else
-    throw new ServerError('Error while deleting hotel');
+  if (user.role !== ROLES.SUPER_ADMIN) {
+    throw new ForbiddenError("Only an administrator can remove a restaurant.");
   }
+
+  const hotel = await Hotel.findById(hotelId);
+  if (!hotel) throw new NotFoundError("Restaurant");
+
+  // Soft-deactivate rather than drop: bills and orders still reference it.
+  hotel.isActive = false;
+  await hotel.save();
+
+  await HotelOwner.updateMany({ hotelId }, { isSuspended: true });
+
+  return hotel;
 };
 
-
-export const getAllHotelsService = async (user) => {
-  try {
-    // SuperAdmins are allowed to view all hotels
-    if (user.role !== ROLES.SUPER_ADMIN) {
-      throw new ClientError('Access denied. Only SuperAdmins can view all hotels.', 403);
-    }
-
-    // Fetch all hotels and populate the ownerId field with the owner's name
-    const hotels = await Hotel.find().populate('ownerId', 'name');
-
-    return hotels;
-  } catch (error) {
-    if(error instanceof ClientError) {
-      throw error;
-    }
-    else
-    throw new ServerError('Error while fetching hotels',error);
+export const getAllHotelsService = async ({ page = 1, limit = 20, search } = {}) => {
+  const filter = {};
+  if (search) {
+    const escaped = String(search).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    filter.name = { $regex: escaped, $options: "i" };
   }
+
+  const [hotels, total] = await Promise.all([
+    Hotel.find(filter)
+      .populate("ownerId", "name email membershipExpires isApproved")
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit),
+    Hotel.countDocuments(filter),
+  ]);
+
+  return {
+    hotels,
+    pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
+  };
 };

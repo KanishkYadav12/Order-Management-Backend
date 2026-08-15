@@ -1,112 +1,120 @@
 import { catchAsyncError } from "../middlewares/catchAsyncError.js";
 import {
-    createDishService,
-    deleteDishService,
-    getAllDishesService,
-    getDishByIdService,
-    updateDishService,
-    getDishesByCategoryService,
-    removeOfferFromDishService,
+  createDishService,
+  deleteDishService,
+  getAllDishesService,
+  getDishByIdService,
+  updateDishService,
+  getDishesByCategoryService,
+  removeOfferFromDishService,
+  setDishStockService,
 } from "../services/dishServices.js";
-import { ClientError } from "../utils/errorHandler.js";
-import uploadAndGetAvatarUrl from "../utils/uploadAndGetUrl.js";
+
+/**
+ * `req.hotelId` is set by `attachHotelId`/`requireHotel` and is the only
+ * source of tenant scope in this layer — handlers never read a hotel id from
+ * the request body.
+ */
 
 export const getDishById = catchAsyncError(async (req, res) => {
-    const dishId = req.params.dishId;
+  const dish = await getDishByIdService(req.params.dishId, req.hotelId);
 
-    // Call the service to get dish details
-    const dish = await getDishByIdService(dishId);
-
-    res.status(200).json({
-        status: "success",
-        message: "Dish details fetched successfully",
-        data: { dish },
-    });
+  res.status(200).json({
+    status: "success",
+    message: "Dish loaded",
+    data: { dish },
+  });
 });
 
 export const getAllDishes = catchAsyncError(async (req, res) => {
-    const hotelId = req.user.hotelId;
-    console.log('dishes-fetching-request')
-    // Call the service to get all dishes
-    const dishes = await getAllDishesService(hotelId);
+  const dishes = await getAllDishesService(req.hotelId, {
+    search: req.query.search,
+    category: req.query.category,
+    includeDeleted: req.query.includeDeleted === "true",
+  });
 
-    res.status(200).json({
-        status: "success",
-        message: "All dishes fetched successfully",
-        data: { dishes },
-    });
+  res.status(200).json({
+    status: "success",
+    message: "Dishes loaded",
+    data: { dishes },
+  });
 });
 
 export const createDish = catchAsyncError(async (req, res) => {
-    const dishData = req.body;
-    dishData.hotelId = req.user.hotelId;
+  const dish = await createDishService(req.hotelId, req.body);
 
-    // Call the service to create a new dish
-    const dish = await createDishService(dishData);
-
-    res.status(201).json({
-        status: "success",
-        message: "Dish created successfully",
-        data: { dish },
-    });
+  res.status(201).json({
+    status: "success",
+    message: "Dish created",
+    data: { dish },
+  });
 });
 
 export const updateDish = catchAsyncError(async (req, res) => {
-    const dishId = req.params.dishId;
-    const dishData = req.body;
+  const dish = await updateDishService(
+    req.params.dishId,
+    req.hotelId,
+    req.body
+  );
 
-    // Call the service to update the dish
-    const dish = await updateDishService(dishId, dishData);
-    // if (req.file) {
-    //     const logoUrl = await uploadAndGetAvatarUrl(req.file, 'OMS', dish._id, "stream");
-    //     dish.logo = logoUrl;
-    //     await dish.save();
-    // }
-
-    res.status(200).json({
-        status: "success",
-        message: "Dish updated successfully",
-        data: { dish },
-    });
+  res.status(200).json({
+    status: "success",
+    message: "Dish updated",
+    data: { dish },
+  });
 });
 
 export const deleteDish = catchAsyncError(async (req, res) => {
-    const dishId = req.params.dishId;
+  const dish = await deleteDishService(req.params.dishId, req.hotelId);
 
-    // Call the service to delete the dish
-    const dish = await deleteDishService(dishId);
-
-    res.status(200).json({
-        status: "success",
-        message: "Dish deleted successfully",
-        data: { dish },
-    });
+  res.status(200).json({
+    status: "success",
+    message: "Dish removed",
+    data: { dish },
+  });
 });
 
 export const getDishesByCategory = catchAsyncError(async (req, res) => {
-    const { categoryId } = req.params;
+  const dishes = await getDishesByCategoryService(
+    req.hotelId,
+    req.params.categoryId
+  );
 
-    // Call the service to get dishes by category
-    const dishes = await getDishesByCategoryService(req.user.hotelId, categoryId);
-
-    res.status(200).json({
-        status: "success",
-        message: "Dishes fetched successfully",
-        data: { dishes },
-    });
+  res.status(200).json({
+    status: "success",
+    message: "Dishes loaded",
+    data: { dishes },
+  });
 });
 
+export const removeOfferFromDish = catchAsyncError(
+  async (req, res, next, session) => {
+    const dish = await removeOfferFromDishService(
+      req.params.dishId,
+      req.hotelId,
+      session
+    );
 
-export const removeOfferFromDish = catchAsyncError(async (req, res, next, session) => {
-    const { dishId } = req.params;
-    if (!dishId) {
-        throw new ClientError("Please provide dish id to remove offer from dish!")
-    }
-    const dish = await removeOfferFromDishService(dishId, session);
-    console.log("dish in remove offer" ,dish)
     res.status(200).json({
-        status: "success",
-        message: "Offer removed from dish successfully",
-        data: { dish },
+      status: "success",
+      message: "Offer removed from dish",
+      data: { dish },
     });
-}, true)
+  },
+  true
+);
+
+/** Quick in/out-of-stock toggle for the floor, without a full dish edit. */
+export const setDishStock = catchAsyncError(async (req, res) => {
+  const dish = await setDishStockService(
+    req.params.dishId,
+    req.hotelId,
+    req.body.outOfStock
+  );
+
+  res.status(200).json({
+    status: "success",
+    message: dish.outOfStock ? "Dish marked out of stock" : "Dish back in stock",
+    data: { dish },
+  });
+});

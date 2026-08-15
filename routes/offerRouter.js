@@ -1,19 +1,52 @@
-import express from 'express';
-import { attachHotelId, protect, superAdminOnly, validateOwnership } from "../middlewares/authMiddleware.js";
-import { getOfferDetails, updateOffer, deleteOffer, createOffer, getAllOffers } from "../controllers/offerController.js";
-
+import express from "express";
+import { protect, attachHotelId, authorize } from "../middlewares/authMiddleware.js";
+import { validate } from "../middlewares/validate.js";
+import { PERMISSIONS } from "../utils/constant.js";
+import {
+  getOfferDetails,
+  updateOffer,
+  deleteOffer,
+  createOffer,
+  getAllOffers,
+} from "../controllers/offerController.js";
+import {
+  createOfferSchema,
+  updateOfferSchema,
+  offerIdSchema,
+} from "../validators/menu.js";
 
 const router = express.Router();
 
-router.get('/:id', protect, validateOwnership, getOfferDetails);
+router.use(protect, attachHotelId);
 
-router.get('/', protect, attachHotelId, getAllOffers);
+router.get("/", authorize(PERMISSIONS.MENU_READ), getAllOffers);
 
-router.post('/', protect, attachHotelId, createOffer);
+router.post(
+  "/",
+  authorize(PERMISSIONS.MENU_WRITE),
+  validate(createOfferSchema),
+  createOffer
+);
 
-router.put('/:id', protect, validateOwnership, updateOffer);
+router.get(
+  "/:id",
+  authorize(PERMISSIONS.MENU_READ),
+  validate(offerIdSchema),
+  getOfferDetails
+);
 
-router.delete('/:id', protect, validateOwnership, deleteOffer);
+router.put(
+  "/:id",
+  authorize(PERMISSIONS.MENU_WRITE),
+  validate(updateOfferSchema),
+  updateOffer
+);
 
+router.delete(
+  "/:id",
+  authorize(PERMISSIONS.MENU_WRITE),
+  validate(offerIdSchema),
+  deleteOffer
+);
 
 export default router;

@@ -1,279 +1,306 @@
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
-import { ROLES } from "../utils/constant.js";
+import { ROLES, hasPermission } from "../utils/constant.js";
 import { SuperAdmin, HotelOwner } from "../models/userModel.js";
-import { ClientError, ServerError } from "../utils/errorHandler.js"; // Import the custom error classes
-import dotenv from "dotenv";
+import Hotel from "../models/hotelModel.js";
+import { verifyAccessToken } from "../utils/generateToken.js";
+import {
+  AuthError,
+  ForbiddenError,
+  ClientError,
+  NotFoundError,
+} from "../utils/errorHandler.js";
+import logger from "../utils/logger.js";
 
-dotenv.config();
-
-// Middleware to protect routes by verifying JWT and attaching user to request object
-// export const protect = async (req, res, next) => {
-//   let token;
-
-//   // Check if authorization header exists and starts with 'Bearer'
-//   if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-//     try {
-//       // Get token from header
-//       token = req.headers.authorization.split(' ')[1];
-
-//       // Verify token using JWT_SECRET
-//       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-//       // Dynamically attach the user model based on the role (SuperAdmin or HotelOwner)
-//       if (decoded.role === ROLES.SUPER_ADMIN) {
-//         req.user = await SuperAdmin.findById(decoded.id).select('-password');
-//       } else if (decoded.role === ROLES.HOTEL_OWNER) {
-//         req.user = await HotelOwner.findById(decoded.id).select('-password');
-//       }
-
-//       // If user is not found, throw ClientError
-//       if (!req.user) {
-//         throw new ClientError('User not found', 401);
-//       }
-
-//       // If user is found, move to the next middleware or route handler
-
-//       if(req.user.isApproved === false){
-//         throw new ClientError('User not approved', 401);
-//       }
-
-//       if( req.user.role==ROLES.HOTEL_OWNER && ( req.user.membershipExpires==null || req.user.membershipExpires < new Date())){
-//         throw new ClientError('Membership expired', 401);
-//       }
-
-//       next();
-//     } catch (error) {
-//       console.error(error);
-
-//       // Check if it's a tokenExpiredError
-//       if (error.name === 'tokenExpiredError') {
-//         throw new ClientError('token has expired, please log in again', 401);
-//       }
-
-//       // If it's any other error (invalid token, internal issues), throw a ServerError
-//       if (error instanceof jwt.JsonWebtokenError) {
-//         throw new ClientError('Not authorized, token failed', 401);
-//       }
-
-//       // Catch any other unexpected errors and throw a ServerError
-//       throw new ServerError('Server error during authentication', 500);
-//     }
-//   } else {
-//     // If no authorization token is provided, throw ClientError
-//     throw new ClientError('Not authorized, no token', 401);
-//   }
-// };
-
+/**
+ * Authenticates the request and loads the user.
+ *
+ * Every failure path returns a real 401 rather than the 500 the previous
+ * implementation produced, which is what allows the dashboard's 401
+ * interceptor to clear a dead session and redirect to login.
+ */
 export const protect = async (req, res, next) => {
   try {
-    console.log("IN Protect Middleware");
-    const authHeader =
-      req.headers["authorization"] || req.headers["Authorization"] || "";
-    const token =
-      authHeader && authHeader.startsWith("Bearer ")
-        ? authHeader.split(" ")[1]
-        : null;
+    const header = req.headers.authorization ?? "";
+    const token = header.startsWith("Bearer ") ? header.slice(7).trim() : null;
 
     if (!token) {
-      console.log("No token found in Authorization header");
-      return next(new ClientError("Not authorized, no token", 401));
+      return next(new AuthError("You need to sign in to do that."));
     }
 
     let decoded;
     try {
-      // ✅ CHANGE THIS: Use ACCESS_TOKEN_SECRET instead of JWT_SECRET
-      decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
-      console.log("IN Protect decoded : ", decoded);
+      decoded = verifyAccessToken(token);
     } catch (err) {
-      console.error("JWT verify error:", err);
-      if (err.name === "TokenExpiredError") {
+      if (err instanceof jwt.TokenExpiredError) {
         return next(
-          new ClientError("token has expired, please log in again", 401)
+          new ClientError(
+            "Your session has expired. Please sign in again.",
+            401,
+            "TOKEN_EXPIRED"
+          )
         );
       }
-      if (err instanceof jwt.JsonWebTokenError) {
-        return next(new ClientError("Not authorized, token failed", 401));
-      }
-      return next(new ServerError("Server error during authentication", 500));
+      return next(new AuthError("Your session is not valid."));
     }
 
-    const userId = decoded.sub || decoded.id || decoded._id;
-    const userRole = decoded.role;
+    const userId = decoded.sub;
+    if (!userId || !mongoose.isValidObjectId(userId)) {
+      return next(new AuthError("Your session is not valid."));
+    }
 
-    if (!userId) {
+    // The role in the token selects the collection. It is only a routing hint —
+    // authorisation always reads the freshly loaded document below, so a
+    // tampered role claim cannot escalate anything.
+    const Model = decoded.role === ROLES.SUPER_ADMIN ? SuperAdmin : HotelOwner;
+    let user = await Model.findById(userId).select("-password");
+
+    // Fall back to the other collection if the role claim disagreed with
+    // reality (e.g. a token minted before a role change).
+    if (!user) {
+      const Other = Model === SuperAdmin ? HotelOwner : SuperAdmin;
+      user = await Other.findById(userId).select("-password");
+    }
+
+    if (!user) {
+      return next(new AuthError("Your account could not be found."));
+    }
+
+    if (!user.isApproved) {
       return next(
-        new ClientError("Invalid token payload: missing user id", 401)
+        new ClientError(
+          "Your account is awaiting approval.",
+          403,
+          "ACCOUNT_NOT_APPROVED"
+        )
       );
     }
 
-    if (userRole === ROLES.SUPER_ADMIN) {
-      req.user = await SuperAdmin.findById(userId).select("-password");
-    } else if (userRole === ROLES.HOTEL_OWNER) {
-      req.user = await HotelOwner.findById(userId).select("-password");
-    } else {
-      req.user =
-        (await SuperAdmin.findById(userId).select("-password")) ||
-        (await HotelOwner.findById(userId).select("-password"));
+    if (user.isSuspended) {
+      return next(
+        new ClientError(
+          "This account has been suspended.",
+          403,
+          "ACCOUNT_SUSPENDED"
+        )
+      );
     }
 
-    if (!req.user) {
-      return next(new ClientError("User not found", 401));
-    }
-
-    if (!req.user.isApproved) {
-      return next(new ClientError("User not approved", 401));
-    }
-
+    // Membership only gates tenant accounts, and only the owner's own
+    // subscription — staff inherit their hotel's standing.
     if (
-      req.user.role === ROLES.HOTEL_OWNER &&
-      (!req.user.membershipExpires || req.user.membershipExpires < new Date())
+      user.role === ROLES.HOTEL_OWNER &&
+      (!user.membershipExpires || user.membershipExpires < new Date())
     ) {
-      return next(new ClientError("Membership expired", 401));
+      return next(
+        new ClientError(
+          "Your subscription has expired. Please renew to continue.",
+          402,
+          "MEMBERSHIP_EXPIRED"
+        )
+      );
+    }
+
+    req.user = user;
+    req.auth = { userId: user._id, role: user.role, hotelId: user.hotelId };
+    next();
+  } catch (err) {
+    logger.error({ err }, "authentication failed unexpectedly");
+    next(err);
+  }
+};
+
+/**
+ * Asserts the caller is scoped to a hotel before any tenant query runs.
+ *
+ * This is the guard against the `find({ hotelId: undefined })` class of bug:
+ * without it, an owner whose hotel was never created queries with an
+ * undefined scope and — depending on driver settings — can match every
+ * tenant's documents.
+ */
+export const requireHotel = (req, res, next) => {
+  const hotelId = req.scopeHotelId ?? req.user?.hotelId;
+
+  if (!hotelId) {
+    return next(
+      new ClientError(
+        "Your account is not linked to a restaurant yet.",
+        409,
+        "NO_HOTEL_LINKED"
+      )
+    );
+  }
+
+  req.hotelId = hotelId;
+  next();
+};
+
+/**
+ * Lets a super admin act within a specific hotel via `?hotelId=`.
+ *
+ * The previous version read `req.body.hotelId` — impossible on GET, so every
+ * hotel-scoped list was unusable for a super admin — and wrote the unvalidated
+ * value straight onto `req.user`.
+ */
+export const attachHotelId = async (req, res, next) => {
+  try {
+    if (req.user.role !== ROLES.SUPER_ADMIN) {
+      req.hotelId = req.user.hotelId;
+      return requireHotel(req, res, next);
+    }
+
+    const requested =
+      req.query.hotelId ?? req.body?.hotelId ?? req.params?.hotelId;
+
+    if (!requested) {
+      return next(
+        new ClientError(
+          "Add ?hotelId= to choose which restaurant to act on.",
+          400,
+          "HOTEL_ID_REQUIRED"
+        )
+      );
+    }
+
+    if (!mongoose.isValidObjectId(requested)) {
+      return next(new ClientError("That restaurant id is not valid.", 400));
+    }
+
+    const exists = await Hotel.exists({ _id: requested });
+    if (!exists) return next(new NotFoundError("Restaurant"));
+
+    req.scopeHotelId = requested;
+    req.hotelId = requested;
+    next();
+  } catch (err) {
+    next(err);
+  }
+};
+
+/** Platform administration only. */
+export const superAdminOnly = (req, res, next) => {
+  if (req.user?.role !== ROLES.SUPER_ADMIN) {
+    return next(new ForbiddenError("This area is restricted to administrators."));
+  }
+  next();
+};
+
+/**
+ * Permission gate.
+ *
+ *   router.post("/", protect, authorize(PERMISSIONS.MENU_WRITE), createDish)
+ */
+export const authorize =
+  (...permissions) =>
+  (req, res, next) => {
+    const role = req.user?.role;
+    if (!role) return next(new AuthError("You need to sign in to do that."));
+
+    const missing = permissions.filter((p) => !hasPermission(role, p));
+    if (missing.length > 0) {
+      logger.warn(
+        { role, missing, path: req.originalUrl },
+        "permission denied"
+      );
+      return next(
+        new ForbiddenError("Your role does not allow that action.")
+      );
+    }
+    next();
+  };
+
+/** Role gate, for the cases where a permission would be too fine-grained. */
+export const requireRole =
+  (...roles) =>
+  (req, res, next) => {
+    if (!roles.includes(req.user?.role)) {
+      return next(new ForbiddenError("Your role does not allow that action."));
+    }
+    next();
+  };
+
+/**
+ * Maps a mounted route prefix to the model that owns its `:id` parameter.
+ *
+ * The previous implementation derived the model name from the URL by
+ * capitalising and stripping the trailing "s" — which produced "Dishe" for
+ * /dishes and would silently fail open on any prefix that did not pluralise
+ * regularly.
+ */
+const RESOURCE_MODELS = {
+  bills: "Bill",
+  offers: "Offer",
+  orders: "Order",
+  tables: "Table",
+  dishes: "Dish",
+  categories: "Category",
+  ingredients: "Ingredient",
+  hotels: "Hotel",
+};
+
+/**
+ * Confirms the addressed resource belongs to the caller's hotel.
+ *
+ * Reads the first `*id*` route parameter, loads the document, and compares
+ * its `hotelId`. A missing model mapping is treated as a failure, never as a
+ * pass — this middleware must fail closed.
+ */
+export const validateOwnership = async (req, res, next) => {
+  try {
+    const { user } = req;
+
+    if (user.role === ROLES.SUPER_ADMIN) return next();
+
+    const hotelId = req.hotelId ?? user.hotelId;
+    if (!hotelId) {
+      return next(
+        new ClientError(
+          "Your account is not linked to a restaurant yet.",
+          409,
+          "NO_HOTEL_LINKED"
+        )
+      );
+    }
+
+    const prefix = req.baseUrl.split("/").filter(Boolean).pop();
+    const modelName = RESOURCE_MODELS[prefix];
+
+    if (!modelName) {
+      logger.error({ prefix, baseUrl: req.baseUrl }, "no ownership model mapped");
+      return next(
+        new ForbiddenError("This resource cannot be verified for access.")
+      );
+    }
+
+    const idKey = Object.keys(req.params).find((key) =>
+      key.toLowerCase().endsWith("id")
+    );
+    if (!idKey) return next(new ClientError("Missing resource id.", 400));
+
+    const resourceId = req.params[idKey];
+    if (!mongoose.isValidObjectId(resourceId)) {
+      return next(new ClientError("That id is not valid.", 400));
+    }
+
+    const Model = mongoose.model(modelName);
+
+    // Hotels are matched on their own _id; everything else on hotelId.
+    const scopeField = modelName === "Hotel" ? "_id" : "hotelId";
+    const doc = await Model.findOne({
+      _id: resourceId,
+      [scopeField]: hotelId,
+    }).select("_id");
+
+    if (!doc) {
+      // Deliberately a 404 rather than a 403: telling an attacker that a
+      // resource exists but belongs to someone else is itself a disclosure.
+      return next(new NotFoundError(modelName));
     }
 
     next();
   } catch (err) {
-    console.error("protect middleware error:", err);
-    return next(new ServerError("Server error during authentication", 500));
-  }
-};
-export const attachHotelId = (req, res, next) => {
-  const { user } = req;
-
-  if (user.role === ROLES.SUPER_ADMIN) {
-    const { hotelId } = req.body;
-
-    if (!hotelId) {
-      return next(
-        new ClientError(
-          "Hotel ID is required for super admin role to access hotel resources",
-          400
-        )
-      );
-    }
-
-    req.user.hotelId = hotelId;
-  }
-  next();
-};
-// Middleware to check if the logged-in user is a SuperAdmin
-export const superAdminOnly = (req, res, next) => {
-  // Ensure only SuperAdmins can access this route
-
-  if (req.user.role !== ROLES.SUPER_ADMIN) {
-    return next(
-      new ClientError("ForbiddenError", "Access denied. SuperAdmin only.")
-    );
-  }
-
-  next();
-};
-
-export const validateOwnership = async (req, res, next) => {
-  const { user } = req;
-
-  if (user.role === ROLES.SUPER_ADMIN) {
-    return next();
-  }
-
-  try {
-    const resource = req.baseUrl.split("/")[3];
-    console.log("resource", resource);
-
-    const resourceIdKey = Object.keys(req.params).find((key) =>
-      key.toLowerCase().includes("id")
-    );
-
-    if (!resourceIdKey) {
-      return next(new ClientError("Resource ID not provided", 400));
-    }
-
-    const resourceId = req.params[resourceIdKey];
-    const modelString =
-      resource.charAt(0).toUpperCase() + resource.slice(1, -1);
-    console.log("modelString :", modelString);
-
-    const ResourceModel =
-      mongoose.models[modelString] || mongoose.model(modelString);
-
-    console.log("resourceId", resourceId);
-    console.log("resourceModel", ResourceModel);
-
-    if (!ResourceModel) {
-      return next(new ClientError(`Invalid resource: ${resource}`, 400));
-    }
-
-    const resourceData = await ResourceModel.findById(resourceId);
-    console.log("resourceData", resourceData);
-
-    if (!resourceData) {
-      return next(new ClientError(`${resource} not found`, 404));
-    }
-
-    if (!resourceData.hotelId.equals(user.hotelId)) {
-      return next(
-        new ClientError(
-          "Access denied. This resource does not belong to your hotel.",
-          403
-        )
-      );
-    }
-
-    next();
-  } catch (error) {
-    next(error);
+    next(err);
   }
 };
 
-// export const validateOwnership = async (req, res, next) => {
-//   const { user } = req;
-
-//   // Only HotelOwners need ownership validation
-//   if (user.role == ROLES.SUPER_ADMIN) {
-//     return next();
-//   }
-
-//   try {
-//     // Dynamically extract resource name from URL path (tables, bills, etc.)
-//     const resource = req.baseUrl.split('/')[3]; // Example: /tables/:id or /bills/:id
-//     const resourceIdKey = Object.keys(req.params).find((key) => key.toLowerCase().includes('id'));
-
-//     if (!resourceIdKey) {
-//       throw new ClientError('Resource ID not provided', 400);
-//     }
-
-//     const resourceId = req.params[resourceIdKey];
-
-//     // Dynamically load the resource model from Mongoose based on resource name
-//     const ResourceModel = mongoose.models[resource.charAt(0).toUpperCase() + resource.slice(1)];
-
-//     if (!ResourceModel) {
-//       throw new ClientError(`Invalid resource: ${resource}`, 400);
-//     }
-
-//     // Fetch the resource data by ID
-//     const resourceData = await ResourceModel.findById(resourceId);
-//     if (!resourceData) {
-//       throw new ClientError(`${resource} not found`, 404);
-//     }
-
-//     // Check if the resource belongs to the same hotel as the hotel owner
-//     if (!resourceData.hotelId.equals(user.hotelId)) {
-//       throw new ClientError('Access denied. This resource does not belong to your hotel.', 403);
-//     }
-
-//     // Proceed to the next middleware if ownership is validated
-//     next();
-//   } catch (error) {
-//     console.error(error);
-
-//     // Handle specific ClientError scenarios
-//     if (error instanceof ClientError) {
-//       return res.status(error.statusCode).json({ success: false, message: error.message });
-//     }
-
-//     // Any unexpected error is treated as a server error
-//     throw new ServerError('Server error during ownership validation', 500);
-//   }
-// };
+export default protect;
