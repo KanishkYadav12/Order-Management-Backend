@@ -5,7 +5,8 @@
   "main": "api/index.js",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": "24.x",
+    "npm": ">=10"
   },
   "scripts": {
     "dev": "nodemon api/index.js",
