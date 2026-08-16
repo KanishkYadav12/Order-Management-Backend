@@ -11,6 +11,7 @@ import mongoose from "mongoose";
 import env from "../config/env.js";
 import logger from "../utils/logger.js";
 import { error, notFound } from "../middlewares/errorMiddleware.js";
+import { ForbiddenError } from "../utils/errorHandler.js";
 import { globalLimiter } from "../middlewares/security.js";
 
 import userRouter from "../routes/userRouter.js";
@@ -53,17 +54,36 @@ export const createApp = ({ requestLogging = true } = {}) => {
     }),
   );
 
+  /**
+   * A browser's `Origin` header is scheme + host + port, never a trailing
+   * slash. Pasting "https://app.example.com/" — which is what you get from a
+   * browser address bar — would therefore match nothing, and every request
+   * from the real app would be rejected with no clue why. Normalise instead
+   * of making that a support ticket.
+   */
   const allowedOrigins = new Set(
-    [env.FRONTEND_URL, env.CUSTOMER_APP_URL, ...env.CORS_ORIGINS].filter(
-      Boolean,
-    ),
+    [env.FRONTEND_URL, env.CUSTOMER_APP_URL, ...env.CORS_ORIGINS]
+      .filter(Boolean)
+      .map((value) => String(value).trim().replace(/\/+$/, "")),
   );
+
+  logger.info({ allowedOrigins: [...allowedOrigins] }, "CORS allowlist");
 
   const corsOptions = {
     origin(origin, callback) {
       if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+
+      /**
+       * A bare `new Error` here surfaced as a 500 — the terminal handler saw
+       * an unrecognised error, assumed the server had broken, and (outside
+       * production) attached a stack trace to the response. A browser being
+       * told "no" is not a server fault: it is a 403, and it should read as
+       * one in the logs.
+       */
       logger.warn({ origin }, "blocked by CORS");
-      return callback(new Error("Not allowed by CORS"));
+      return callback(
+        new ForbiddenError("This origin is not allowed to call the API.")
+      );
     },
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-Customer-Session"],
