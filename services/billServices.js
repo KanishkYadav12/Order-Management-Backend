@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import Bill from "../models/billModel.js";
 import Order from "../models/orderModel.js";
 import Customer from "../models/customerModel.js";
@@ -383,17 +384,59 @@ export const listBillsService = async (hotelId, query = {}) => {
     ];
   }
 
-  const [bills, total] = await Promise.all([
+  /**
+   * Totals span the whole filtered period, not the page.
+   *
+   * Summing the twenty rows that happen to be on screen answers a question
+   * nobody asked. When someone filters to a named day or month they want that
+   * day's takings — which is the number they reconcile against the drawer.
+   */
+  const [bills, total, [totals] = []] = await Promise.all([
     Bill.find(filter)
       .populate(BILL_POPULATE)
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
     Bill.countDocuments(filter),
+    Bill.aggregate([
+      /**
+       * `$match` is handed straight to the driver — unlike `find`, the
+       * aggregation pipeline does not run values through the schema. A
+       * `hotelId` that arrived as a string (which is exactly what a super
+       * admin's `?hotelId=` gives you) would match no documents and every
+       * total would silently read zero. Cast it here.
+       */
+      {
+        $match: {
+          ...filter,
+          hotelId: new mongoose.Types.ObjectId(String(hotelId)),
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          gross: { $sum: "$finalAmount" },
+          settled: {
+            $sum: {
+              $cond: [{ $eq: ["$status", BILL_STATUS.PAID] }, "$finalAmount", 0],
+            },
+          },
+          settledCount: {
+            $sum: { $cond: [{ $eq: ["$status", BILL_STATUS.PAID] }, 1, 0] },
+          },
+        },
+      },
+    ]),
   ]);
 
   return {
     bills,
+    totals: {
+      gross: round2(totals?.gross ?? 0),
+      settled: round2(totals?.settled ?? 0),
+      settledCount: totals?.settledCount ?? 0,
+      count: total,
+    },
     pagination: {
       page,
       limit,

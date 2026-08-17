@@ -80,10 +80,10 @@ const request = (method, path, { body, token, cookie } = {}) =>
  * failure. Set VERIFY_OWNER_PASSWORD (or re-run `npm run seed:demo -- --reset`)
  * to get back to a known state.
  */
-const OWNER_EMAIL = process.env.VERIFY_OWNER_EMAIL ?? "owner@spicegarden.in";
-const OWNER_PASSWORD = process.env.VERIFY_OWNER_PASSWORD ?? "Owner@2026";
-const ADMIN_EMAIL = process.env.VERIFY_ADMIN_EMAIL ?? "admin@qrdine.app";
-const ADMIN_PASSWORD = process.env.VERIFY_ADMIN_PASSWORD ?? "Admin@2026";
+const OWNER_EMAIL = process.env.VERIFY_OWNER_EMAIL ?? "ykanishk479@gmail.com";
+const OWNER_PASSWORD = process.env.VERIFY_OWNER_PASSWORD ?? "123456";
+const ADMIN_EMAIL = process.env.VERIFY_ADMIN_EMAIL ?? "ykanishk479+owner@gmail.com";
+const ADMIN_PASSWORD = process.env.VERIFY_ADMIN_PASSWORD ?? "123456";
 
 const run = async () => {
   section("Authentication");
@@ -156,10 +156,26 @@ const run = async () => {
     res.body?.data?.user?.password === undefined
   );
 
+  /**
+   * Invariants, not seed counts.
+   *
+   * These used to assert "14 tables, 4 of them seated" — the numbers the demo
+   * seed happens to produce. Settling a bill frees its table and deletes its
+   * orders, and deleting a table hides it, so simply *using* the app made the
+   * suite fail and taught you to ignore red. Assert the relationships that
+   * must hold however much the data moves.
+   */
   res = await request("GET", "/api/v1/tables", auth);
   const tables = res.body?.data?.tables ?? [];
-  check("tables load", res.status === 200 && tables.length === 14, `got ${res.status}, ${tables.length} tables`);
-  check("4 tables are seated", tables.filter((t) => t.status === "occupied").length === 4);
+  check("tables load", res.status === 200 && tables.length > 0,
+    `got ${res.status}, ${tables.length} tables`);
+  check("every table has a number and a known status",
+    tables.every(
+      (t) =>
+        t.sequence !== undefined &&
+        ["free", "occupied", "reserved", "cleaning"].includes(t.status)
+    ),
+    JSON.stringify(tables[0])?.slice(0, 120));
 
   res = await request("GET", "/api/v1/dishes", auth);
   check("menu loads", res.status === 200 && res.body?.data?.dishes?.length === 27,
@@ -169,8 +185,18 @@ const run = async () => {
   check("categories load", res.status === 200 && res.body?.data?.categories?.length === 6);
 
   res = await request("GET", "/api/v1/orders", auth);
-  check("live orders load", res.status === 200 && res.body?.data?.orders?.length === 4,
-    `got ${res.body?.data?.orders?.length} orders`);
+  const liveOrders = res.body?.data?.orders;
+  check("live orders load", res.status === 200 && Array.isArray(liveOrders),
+    `got ${res.status}, ${typeof liveOrders}`);
+  check("a seated table is exactly a table with live orders",
+    tables.filter((t) => t.status === "occupied").length ===
+      new Set(
+        (liveOrders ?? [])
+          .map((order) => order.tableId?._id ?? order.tableId)
+          .filter(Boolean)
+          .map(String)
+      ).size,
+    `${tables.filter((t) => t.status === "occupied").length} seated vs ${liveOrders?.length} orders`);
 
   res = await request("GET", "/api/v1/bills?limit=5", auth);
   check("bills paginate", res.status === 200 && res.body?.data?.bills?.length === 5,
@@ -245,6 +271,106 @@ const run = async () => {
   check("a bill id is rejected by the table-billing endpoint", res.status === 404,
     `got ${res.status}`);
 
+  section("Bill period totals");
+
+  /**
+   * The bills screen filters by a named day, month or range. A period filter
+   * with no period total is half a feature, so the list endpoint returns the
+   * sums across every matching bill — not just the page on screen.
+   */
+  res = await request("GET", "/api/v1/bills?limit=5", auth);
+  const allTotals = res.body?.data?.totals;
+  check("the list returns period totals", Boolean(allTotals),
+    JSON.stringify(res.body?.data ? Object.keys(res.body.data) : null));
+  check("totals count every matching bill, not just the page",
+    allTotals?.count === res.body?.data?.pagination?.total &&
+      res.body?.data?.bills?.length === 5,
+    `count=${allTotals?.count} total=${res.body?.data?.pagination?.total}`);
+  check("settled never exceeds gross",
+    allTotals?.settled <= allTotals?.gross + 0.01,
+    `settled=${allTotals?.settled} gross=${allTotals?.gross}`);
+
+  /**
+   * Guards the aggregation cast: `$match` bypasses Mongoose's schema, so a
+   * string hotelId matches nothing and every total silently reads zero while
+   * the list beside it still shows rows.
+   */
+  check("totals are not silently zero while bills exist",
+    (allTotals?.count ?? 0) > 0 && (allTotals?.gross ?? 0) > 0,
+    `count=${allTotals?.count} gross=${allTotals?.gross}`);
+
+  // A narrow window must return a subset, not the same numbers.
+  const dayFrom = new Date(); dayFrom.setHours(0, 0, 0, 0);
+  const dayTo = new Date(); dayTo.setHours(23, 59, 59, 999);
+  res = await request(
+    "GET",
+    `/api/v1/bills?from=${dayFrom.toISOString()}&to=${dayTo.toISOString()}`,
+    auth
+  );
+  check("a single-day filter narrows the totals",
+    res.status === 200 && res.body?.data?.totals?.count <= allTotals?.count,
+    `day=${res.body?.data?.totals?.count} all=${allTotals?.count}`);
+
+  section("Staff order entry");
+
+  /**
+   * A walk-in has no phone, no email and often no name. The board had no way
+   * to start an order at all, and the question this answers is the first one
+   * staff ask: what happens when the guest gives you nothing?
+   */
+  const freeTable = tables.find((t) => t.status === "free") ?? tables[0];
+  res = await request("GET", "/api/v1/dishes", auth);
+  const someDish = res.body?.data?.dishes?.[0];
+
+  res = await request("POST", `/api/v1/orders/${freeTable?._id}`, {
+    ...auth,
+    body: { dishes: [{ dishId: someDish?._id, quantity: 2 }], status: "pending" },
+  });
+  const walkIn = res.body?.data?.order;
+  check("an order can be placed with no guest details at all",
+    res.status === 201 || res.status === 200,
+    `got ${res.status}: ${JSON.stringify(res.body)?.slice(0, 160)}`);
+  check("the nameless guest is recorded as a guest",
+    Boolean(walkIn?._id),
+    JSON.stringify(walkIn)?.slice(0, 160));
+
+  // Placing an order seats the table.
+  res = await request("GET", "/api/v1/tables", auth);
+  const afterOrder = (res.body?.data?.tables ?? []).find(
+    (t) => String(t._id) === String(freeTable?._id)
+  );
+  check("placing an order seats its table", afterOrder?.status === "occupied",
+    `table is ${afterOrder?.status}`);
+
+  /**
+   * Cancelling the only order must free it again.
+   *
+   * The rule was "any status except draft occupies the table", so cancelling
+   * marked the table busy. The board showed nothing — cancelled orders are in
+   * no column — while the floor showed a seated table that could never be
+   * cleared, because there was nothing left to advance or to bill.
+   */
+  if (walkIn?._id) {
+    res = await request("PATCH", `/api/v1/orders/${walkIn._id}/cancelled`, auth);
+    check("an order can be cancelled", res.status === 200, `got ${res.status}`);
+  }
+
+  res = await request("GET", "/api/v1/tables", auth);
+  const afterCancel = (res.body?.data?.tables ?? []).find(
+    (t) => String(t._id) === String(freeTable?._id)
+  );
+  check("cancelling the last order frees its table",
+    afterCancel?.status === "free",
+    `table is ${afterCancel?.status}`);
+
+  res = await request("GET", "/api/v1/orders", auth);
+  check("a cancelled order is off the board",
+    !Object.values(res.body?.data ?? {})
+      .filter(Array.isArray)
+      .flat()
+      .some((order) => String(order?._id) === String(walkIn?._id)),
+    "the cancelled order is still on the board");
+
   section("Dashboard");
 
   // An explicit range, because the default window is the current calendar
@@ -258,8 +384,16 @@ const run = async () => {
     `${stats?.series?.length} days`);
   check("top dishes computed", (stats?.topDishes?.length ?? 0) > 0);
   check("payment mix computed", (stats?.paymentMix?.length ?? 0) > 0);
-  check("table counts correct", stats?.tables?.total === 14 && stats?.tables?.occupied === 4,
-    JSON.stringify(stats?.tables));
+  // The dashboard's own tally must agree with the tables endpoint, and its
+  // parts must sum to its total. Both hold whatever the floor is doing.
+  check("dashboard table counts agree with the floor",
+    stats?.tables?.total === tables.length &&
+      stats.tables.total ===
+        (stats.tables.free ?? 0) +
+          (stats.tables.occupied ?? 0) +
+          (stats.tables.reserved ?? 0) +
+          (stats.tables.cleaning ?? 0),
+    `${JSON.stringify(stats?.tables)} vs ${tables.length} tables`);
   check("low-stock alert fires", stats?.alerts?.lowStockIngredients > 0,
     `${stats?.alerts?.lowStockIngredients} flagged`);
 

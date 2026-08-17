@@ -10,12 +10,15 @@ import {
 } from "../services/billServices.js";
 
 export const getAllBills = catchAsyncError(async (req, res) => {
-  const { bills, pagination } = await listBillsService(req.hotelId, req.query);
+  const { bills, pagination, totals } = await listBillsService(
+    req.hotelId,
+    req.query
+  );
 
   res.status(200).json({
     status: "success",
     message: "Bills loaded",
-    data: { bills, pagination },
+    data: { bills, pagination, totals },
   });
 });
 

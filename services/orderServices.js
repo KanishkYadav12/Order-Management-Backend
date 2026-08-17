@@ -158,14 +158,32 @@ export const addNewOrderService = async (orderData, session) => {
     customer = created;
     newCustomer = created;
     isFirstOrder = true;
+  }
 
+  /**
+   * Seat the table for any order that is not a draft.
+   *
+   * This used to live inside the `if (!customer)` branch, so the table was
+   * only ever seated alongside the *first* order at it. A customer row that
+   * outlived its orders — which is exactly what a cancelled sitting leaves
+   * behind — meant every later order at that table skipped seating entirely,
+   * and the floor showed it free while the kitchen cooked for it.
+   *
+   * `occupiedAt` is only written when unset so the table-turn clock measures
+   * the sitting rather than the most recent order.
+   */
+  if ((status ?? ORDER_STATUS.DRAFT) !== ORDER_STATUS.DRAFT) {
     updatedTable = await Table.findOneAndUpdate(
       { _id: tableId, hotelId },
-      {
-        status: TABLE_STATUS.OCCUPIED,
-        customer: customer._id,
-        occupiedAt: new Date(),
-      },
+      [
+        {
+          $set: {
+            status: TABLE_STATUS.OCCUPIED,
+            customer: customer._id,
+            occupiedAt: { $ifNull: ["$occupiedAt", new Date()] },
+          },
+        },
+      ],
       { new: true, session }
     );
   }
@@ -209,6 +227,13 @@ export const getAllOrderService = async (hotelId, options = {}) => {
 
   const filter = { hotelId };
   if (options.status) filter.status = options.status;
+  else {
+    // A cancelled order belongs to no column on the board, so shipping it to
+    // the client is noise at best — and it made "no live orders" sit next to
+    // a table the floor still showed as seated. Ask for them explicitly with
+    // `?status=cancelled` when you actually want them.
+    filter.status = { $ne: ORDER_STATUS.CANCELLED };
+  }
   if (options.tableId) filter.tableId = options.tableId;
   // The kitchen board only ever wants live orders.
   if (options.activeOnly) {
@@ -255,7 +280,24 @@ export const updateOrderStatusService = async (
   const customerId = order.customerId?._id ?? order.customerId;
   let updatedTable = null;
 
-  if (status !== ORDER_STATUS.DRAFT) {
+  /**
+   * A table is occupied exactly when it has an order someone is still eating.
+   *
+   * The rule used to be "any status except draft occupies the table", which
+   * meant *cancelling* an order marked its table busy. The board then showed
+   * nothing — cancelled orders sit in no column — while the floor showed a
+   * seated table that could never be cleared, because nothing was left to
+   * advance or bill. Draft and cancelled are both "not eating", so they share
+   * one release path.
+   */
+  const SEATED_STATUSES = [
+    ORDER_STATUS.PENDING,
+    ORDER_STATUS.PREPARING,
+    ORDER_STATUS.READY,
+    ORDER_STATUS.COMPLETED,
+  ];
+
+  if (SEATED_STATUSES.includes(status)) {
     // `occupiedAt` starts the table-turn clock and must not be reset each
     // time an order advances, so it is only written when currently unset.
     updatedTable = await Table.findOneAndUpdate(
@@ -272,19 +314,20 @@ export const updateOrderStatusService = async (
       { new: true, session }
     );
   } else {
-    // Reverting to draft: if nothing live remains, release the table.
-    const live = await Order.countDocuments({
+    // Draft or cancelled: free the table once nothing seated remains on it.
+    const seated = await Order.countDocuments({
       tableId,
       hotelId,
-      status: { $ne: ORDER_STATUS.DRAFT },
+      status: { $in: SEATED_STATUSES },
     }).session(session);
 
-    if (live === 0) {
+    if (seated === 0) {
       updatedTable = await Table.findOneAndUpdate(
         { _id: tableId, hotelId },
         { status: TABLE_STATUS.FREE, customer: null, occupiedAt: null },
         { new: true, session }
       );
+      // An open bill for a table nobody is sitting at is not payable.
       await Bill.deleteOne({
         tableId,
         hotelId,
