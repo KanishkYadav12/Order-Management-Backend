@@ -1,0 +1,7 @@
+{
+  "//": "Config lives here because .env is not a file nodemon watches by default — it only tracks js/mjs/json. Editing AI_MODEL or a key therefore left the running server on the old value, and the change looked like it had no effect.",
+  "watch": ["."],
+  "ext": "js,mjs,json,env",
+  "ignore": ["node_modules/**", "scripts/**", "*.test.js"],
+  "delay": 300
+}

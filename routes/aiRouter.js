@@ -18,6 +18,13 @@ import {
   getAnomalies,
   getBriefing,
   askAssistant,
+  dishFacts,
+  approveDishFacts,
+  publicDishFacts,
+  chatWithAdvisor,
+  listConversations,
+  getConversation,
+  deleteConversation,
   generateDishDescription,
   getUpsellSuggestions,
 } from "../controllers/aiController.js";
@@ -33,6 +40,20 @@ const router = express.Router();
  * `briefing` and `describe` call a language model, and each degrades
  * gracefully when none is configured.
  */
+
+/**
+ * Public: the write-up a diner reads before ordering.
+ *
+ * Read-only and approved-only by design — generation is an owner action, so a
+ * table session can never be used to spend the restaurant's AI quota.
+ */
+router.get(
+  "/dish-facts/:hotelId/:dishId",
+  validate({
+    params: z.object({ hotelId: objectId, dishId: objectId }),
+  }),
+  publicDishFacts
+);
 
 /** Public: the QR menu asks for pairings while a diner builds their order. */
 router.get(
@@ -115,6 +136,65 @@ router.post(
   aiLimiter,
   validate({ params: objectIdParam("dishId") }),
   generateDishDescription
+);
+
+/* ── Advisor chat ─────────────────────────────────────────────────────
+   Stateful, tool-calling, and aware of the calendar and local news. The
+   `/ask` route above stays as the stateless single-report version. */
+
+router.post(
+  "/chat",
+  authorize(PERMISSIONS.AI_USE),
+  aiLimiter,
+  validate({
+    body: z.object({
+      message: z
+        .string()
+        .trim()
+        .min(2, "Ask something first.")
+        .max(1000, "That message is too long."),
+      conversationId: objectId.optional(),
+    }),
+  }),
+  chatWithAdvisor
+);
+
+/* Owner-side generation and sign-off for dish write-ups. */
+router.post(
+  "/dish-facts/:dishId",
+  authorize(PERMISSIONS.MENU_WRITE),
+  aiLimiter,
+  validate({
+    params: objectIdParam("dishId"),
+    query: z.object({ force: z.enum(["true", "false"]).optional() }),
+  }),
+  dishFacts
+);
+
+router.patch(
+  "/dish-facts/:dishId/approval",
+  authorize(PERMISSIONS.MENU_WRITE),
+  validate({
+    params: objectIdParam("dishId"),
+    body: z.object({ approved: z.boolean() }),
+  }),
+  approveDishFacts
+);
+
+router.get("/conversations", authorize(PERMISSIONS.AI_USE), listConversations);
+
+router.get(
+  "/conversations/:conversationId",
+  authorize(PERMISSIONS.AI_USE),
+  validate({ params: objectIdParam("conversationId") }),
+  getConversation
+);
+
+router.delete(
+  "/conversations/:conversationId",
+  authorize(PERMISSIONS.AI_USE),
+  validate({ params: objectIdParam("conversationId") }),
+  deleteConversation
 );
 
 export default router;

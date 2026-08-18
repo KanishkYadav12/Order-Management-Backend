@@ -10,6 +10,14 @@ import {
 import { ask, dailyBriefing, describeDish } from "../services/ai/assistant.js";
 import { providerInfo } from "../services/ai/llmProvider.js";
 import { Dish } from "../models/dishModel.js";
+import Conversation from "../models/conversationModel.js";
+import { advise } from "../services/ai/advisor.js";
+import { NotFoundError } from "../utils/errorHandler.js";
+import {
+  getDishFacts,
+  setDishFactsApproval,
+  getPublicDishFacts,
+} from "../services/ai/dishFacts.js";
 
 /**
  * Reports the assistant's configuration so the dashboard can show the right
@@ -149,5 +157,161 @@ export const getUpsellSuggestions = catchAsyncError(async (req, res) => {
     status: "success",
     message: "Suggestions ready",
     data: { suggestions },
+  });
+});
+
+/* ── The advisor chat ─────────────────────────────────────────────────── */
+
+/**
+ * One turn of conversation with the restaurant's advisor.
+ *
+ * Distinct from `askAssistant`, which is a stateless one-shot over a single
+ * report. This carries history, can call several reports in one answer, and
+ * knows what day it is and what is happening in the city.
+ */
+export const chatWithAdvisor = catchAsyncError(async (req, res) => {
+  const { message, conversationId } = req.body;
+
+  let conversation = conversationId
+    ? await Conversation.findOne({
+        _id: conversationId,
+        hotelId: req.hotelId,
+        userId: req.user._id,
+      })
+    : null;
+
+  if (!conversation) {
+    conversation = new Conversation({
+      hotelId: req.hotelId,
+      userId: req.user._id,
+      // The opening question makes a better title than "New chat".
+      title: message.slice(0, 80),
+      turns: [],
+    });
+  }
+
+  const history = conversation.turns.map((turn) => ({
+    role: turn.role,
+    text: turn.text,
+  }));
+
+  const result = await advise(req.hotelId, message, history);
+
+  conversation.turns.push({ role: "user", text: message });
+  conversation.turns.push({
+    role: "model",
+    text: result.reply,
+    toolsUsed: result.toolsUsed,
+  });
+  await conversation.save();
+
+  res.status(200).json({
+    status: "success",
+    message: "Answered",
+    data: {
+      conversationId: conversation._id,
+      reply: result.reply,
+      toolsUsed: result.toolsUsed,
+      groundedOn: result.groundedOn,
+    },
+  });
+});
+
+/** The owner's recent conversations, newest first. */
+export const listConversations = catchAsyncError(async (req, res) => {
+  const conversations = await Conversation.find({
+    hotelId: req.hotelId,
+    userId: req.user._id,
+  })
+    .select("title updatedAt turns")
+    .sort({ updatedAt: -1 })
+    .limit(20)
+    .lean();
+
+  res.status(200).json({
+    status: "success",
+    message: "Conversations loaded",
+    data: {
+      conversations: conversations.map((item) => ({
+        _id: item._id,
+        title: item.title,
+        updatedAt: item.updatedAt,
+        turnCount: item.turns?.length ?? 0,
+      })),
+    },
+  });
+});
+
+export const getConversation = catchAsyncError(async (req, res) => {
+  const conversation = await Conversation.findOne({
+    _id: req.params.conversationId,
+    hotelId: req.hotelId,
+    userId: req.user._id,
+  }).lean();
+
+  if (!conversation) throw new NotFoundError("Conversation");
+
+  res.status(200).json({
+    status: "success",
+    message: "Conversation loaded",
+    data: { conversation },
+  });
+});
+
+export const deleteConversation = catchAsyncError(async (req, res) => {
+  const conversation = await Conversation.findOneAndDelete({
+    _id: req.params.conversationId,
+    hotelId: req.hotelId,
+    userId: req.user._id,
+  });
+
+  if (!conversation) throw new NotFoundError("Conversation");
+
+  res.status(200).json({ status: "success", message: "Conversation removed", data: {} });
+});
+
+/* ── Dish write-ups for the QR menu ───────────────────────────────────── */
+
+/** Owner-side: generate (or fetch the cached) panel for one dish. */
+export const dishFacts = catchAsyncError(async (req, res) => {
+  const result = await getDishFacts(req.params.dishId, req.hotelId, {
+    force: req.query.force === "true",
+  });
+
+  res.status(200).json({
+    status: "success",
+    message: result.cached ? "Loaded from cache" : "Write-up generated",
+    data: { facts: result.facts, cached: result.cached },
+  });
+});
+
+/** Owner-side: publish or unpublish a write-up. */
+export const approveDishFacts = catchAsyncError(async (req, res) => {
+  const facts = await setDishFactsApproval(
+    req.params.dishId,
+    req.hotelId,
+    req.body.approved
+  );
+
+  res.status(200).json({
+    status: "success",
+    message: req.body.approved ? "Published to the menu" : "Hidden from the menu",
+    data: { facts },
+  });
+});
+
+/**
+ * Diner-side: what the QR menu shows.
+ *
+ * Reads only. A diner tapping a dish must never trigger generation — that
+ * would let anyone with a table session spend the restaurant's AI quota.
+ */
+export const publicDishFacts = catchAsyncError(async (req, res) => {
+  const facts = await getPublicDishFacts(req.params.dishId, req.params.hotelId);
+
+  res.status(200).json({
+    status: "success",
+    message: facts ? "Loaded" : "Nothing published for this dish",
+    data: { facts },
   });
 });

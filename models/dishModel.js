@@ -100,6 +100,32 @@ const dishSchema = new mongoose.Schema(
 
     description: { type: String, trim: true, maxlength: 500 },
 
+    /**
+     * The "why you'd order this" panel a diner sees before choosing.
+     *
+     * Generated once by the AI and then **stored**, so the hundredth diner to
+     * tap the same dish is served from the database rather than costing
+     * another API call and another few seconds. `sourceHash` is what makes the
+     * cache correct rather than merely fast: it fingerprints the inputs the
+     * text was written from, so renaming a dish or changing its recipe
+     * invalidates a write-up that no longer describes it.
+     *
+     * Nothing here reaches a diner until `approved` is true. An AI writing
+     * unreviewed health claims onto a public menu is a liability the owner
+     * carries, not the model — so a human signs it off first.
+     */
+    facts: {
+      summary: { type: String, trim: true, maxlength: 400 },
+      highlights: [{ type: String, trim: true, maxlength: 160 }],
+      goodToKnow: { type: String, trim: true, maxlength: 300 },
+      tags: [{ type: String, trim: true, maxlength: 40 }],
+      generatedAt: { type: Date },
+      model: { type: String },
+      sourceHash: { type: String },
+      approved: { type: Boolean, default: false },
+      approvedAt: { type: Date },
+    },
+
     category: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Category",

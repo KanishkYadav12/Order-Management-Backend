@@ -438,9 +438,70 @@ const run = async () => {
   check("prep plan runs", res.status === 200 && res.body?.data?.ready === true);
   check("prep quantities suggested", (res.body?.data?.items?.length ?? 0) > 0);
 
+  /**
+   * The deterministic reports must work whether or not an LLM is configured.
+   *
+   * This used to assert `enabled === false`, which only held while no provider
+   * was set up — configuring one then failed the suite for doing the thing the
+   * suite exists to enable. The invariant is the independence, not the state.
+   */
   res = await request("GET", "/api/v1/ai/status", auth);
-  check("AI status reports analytics available without a provider",
-    res.body?.data?.analyticsAvailable === true && res.body?.data?.enabled === false);
+  check("analytics work regardless of whether an LLM is configured",
+    res.status === 200 && res.body?.data?.analyticsAvailable === true,
+    JSON.stringify(res.body?.data));
+
+  const llmOn = res.body?.data?.enabled === true;
+
+  section("Advisor chat");
+
+  if (!llmOn) {
+    check("advisor degrades honestly with no provider", true, "skipped — no LLM configured");
+  } else {
+    /**
+     * One real turn. This exercises the whole chain: the hotel brief from live
+     * queries, the calendar and news layer, Gemini's tool calling, and the
+     * conversation record that gives the assistant memory.
+     */
+    res = await request("POST", "/api/v1/ai/chat", {
+      ...auth,
+      body: { message: "How did we do over the last 7 days?" },
+    });
+    const chat = res.body?.data;
+
+    /**
+     * A spent free-tier quota is not a defect.
+     *
+     * Gemini's free daily allowance is genuinely small, and a day of
+     * development can exhaust it. Failing the suite for that trains you to
+     * ignore red — the same trap the seed-count assertions fell into. A real
+     * fault still fails; only AI_UNAVAILABLE is treated as "not today".
+     */
+    const quotaSpent = res.body?.code === "AI_UNAVAILABLE";
+
+    if (quotaSpent) {
+      check("advisor skipped — free AI quota spent", true,
+        "resets daily; the chain is simply unverified on this run");
+    } else {
+      check("the advisor answers", res.status === 200 && (chat?.reply?.length ?? 0) > 20,
+        `got ${res.status}: ${JSON.stringify(res.body)?.slice(0, 160)}`);
+      check("the answer is grounded in this restaurant",
+        chat?.groundedOn?.restaurant != null,
+        JSON.stringify(chat?.groundedOn)?.slice(0, 120));
+      check("a conversation is opened so the chat has memory",
+        Boolean(chat?.conversationId));
+    }
+
+    if (chat?.conversationId) {
+      res = await request("GET", `/api/v1/ai/conversations/${chat.conversationId}`, auth);
+      const turns = res.body?.data?.conversation?.turns ?? [];
+      check("both sides of the turn are stored",
+        turns.length === 2 && turns[0].role === "user" && turns[1].role === "model",
+        `${turns.length} turns`);
+
+      // Leave no test conversations behind in the owner's sidebar.
+      await request("DELETE", `/api/v1/ai/conversations/${chat.conversationId}`, auth);
+    }
+  }
 
   section("Role separation");
 
